@@ -38,11 +38,11 @@ class ModelInputProcessor:
     ):
                 
         if self.obs_normalizer is not None:
-            model_inputs = self.obs_normalizer(data)
+            data = self.obs_normalizer(data)
 
         ego_future = data.ego_future
         if ego_future.numel() != 0:
-            ego_future = ego_future[..., :self.future_len, :3] # (x, y, heading) - 原数据已是未来帧，无需跳过第一帧
+            ego_future = ego_future[..., -self.future_len:, :3] # (x, y, heading)
 
         model_inputs = {}
         model_inputs['ego_past'] = data.ego_past.to(device)
@@ -84,6 +84,7 @@ class ModelInputProcessor:
                     gt_with_current[..., 2:3].sin()
                 ], dim=-1)
             ], dim=-1)
+            gt_with_current[..., 1:, :] = self.state_normalizer(gt_with_current[..., 1:, :])
         elif kinematic == 'velocity':
             future_velocity = self.x_differentiate(gt_with_current[..., 1:, :], gt_with_current[..., :1, :])
             gt_with_current = torch.cat([gt_with_current[..., :1, :], future_velocity], dim=-2)
@@ -93,6 +94,4 @@ class ModelInputProcessor:
             future_acc = self.x_differentiate(future_velocity, current_velocity)
             gt_with_current = torch.cat([current_velocity, future_acc], dim=-2)
         
-        gt_with_current = self.state_preprocess(gt_with_current)
-            
         return model_inputs, gt_with_current

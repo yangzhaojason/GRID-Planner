@@ -13,8 +13,6 @@ import os
 import copy
 from flow_planner.train_utils.ddp import gather_tensor
 
-# TODO: decide whether to add device check
-
 @dataclass
 class NuPlanDataSample:
     '''
@@ -244,12 +242,6 @@ class NuPlanDataset(Dataset):
         #         dump({'fail_file': self.fail_token}, './fail.json', file_format='json', indent=4)
         #         idx = self.generate_new_index()
         data = np.load(os.path.join(self.data_dir, self.data_list[idx]))
-        """
-        ['map_name', 'token', 'ego_current_state', 'ego_agent_future', 
-        'neighbor_agents_past', 'neighbor_agents_future', 'static_objects',
-         'lanes', 'lanes_speed_limit', 'lanes_has_speed_limit', 'route_lanes', 
-         'route_lanes_speed_limit', 'route_lanes_has_speed_limit']
-        """
         ego_agent_past = torch.from_numpy(data['ego_agent_past'])
         ego_current_state = torch.from_numpy(data['ego_current_state'])
         ego_agent_future = torch.from_numpy(data['ego_agent_future']).to(torch.float32)
