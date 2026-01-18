@@ -153,7 +153,12 @@ class FlowPlanner(DiffusionADPlanner):
         batch_loss = self.basic_loss(prediction, target_tokens)
         loss_dict['batch_loss'] = batch_loss
         
-        loss = torch.sum(batch_loss, dim=-1) # (B, action_num, action_length, dim)
+        # aggregate loss over token/time dimensions
+        loss = torch.sum(batch_loss, dim=-1) # (B, action_num, action_length)
+        # per-sample planning loss for graph-aware weighting
+        loss_per_sample = loss.view(B, -1).mean(dim=1)  # (B,)
+        loss_dict['ego_planning_loss_per_sample'] = loss_per_sample
+        # vanilla mean loss kept for compatibility (may be overridden by core)
         loss_dict['ego_planning_loss'] = loss.mean()
 
         if self.planner_params['action_overlap'] > 0:

@@ -12,3 +12,16 @@ input_aug:
 
 ego_planning_loss: 1.0
 consistency_loss: 0.5
+
+# Graph-aware weighting for semantic alignment (Sec. 3.4 style).
+# Set enabled: true to turn it on; defaults are conservative.
+graph_weighting:
+  enabled: false          # keep training behavior identical by default
+  alpha1: 0.1             # weight for structural centrality term Cent(tau)
+  alpha2: 1.0             # weight for collision proxy CollProb(tau)
+  cent_radius: 30.0       # [m] radius to count nearby agents for centrality
+  collision_radius: 8.0   # [m] distance threshold for high collision risk
+  temperature: 1.0        # soft temperature on log-weights
+  normalize_by_mean: true # normalize w so that mean weight is ~1
+  max_weight: 10.0
+  min_weight: 0.1

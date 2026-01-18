@@ -5,10 +5,30 @@ export HYDRA_FULL_ERROR=1
 # User Configuration Section
 ###################################
 # Set environment variables
-export NUPLAN_DEVKIT_ROOT=/home/qianzezhong/Flow-Planner/nuplan-devkit # nuplan-devkit absolute path (e.g., "/home/user/nuplan-devkit")
-export NUPLAN_DATA_ROOT=/home/datasets_2/nuplan/ # nuplan dataset absolute path (e.g. "/data")
-export NUPLAN_MAPS_ROOT=/home/datasets_2/nuplan/nuPlan-v1.1/maps # nuplan maps absolute path (e.g. "/data/nuplan-v1.1/maps")
-export NUPLAN_EXP_ROOT=/home/datasets_2/nuplan/nuPlan-v1.1/exp # nuplan experiment absolute path (e.g. "/data/nuplan-v1.1/exp")
+# Flow-Planner repo root on the eval machine
+export PROJECT_ROOT=/home/code/grid_planner
+
+# nuplan-devkit absolute path (inside the repo)
+export NUPLAN_DEVKIT_ROOT=/home/code/grid_planner/nuplan-devkit
+
+# nuplan dataset / maps / exp roots
+export NUPLAN_DATA_ROOT=/home/datasets_2/nuplan/             # e.g. "/data"
+export NUPLAN_MAPS_ROOT=/home/datasets_2/nuplan/nuPlan-v1.1/maps
+export NUPLAN_EXP_ROOT=/home/datasets_2/nuplan/nuPlan-v1.1/exp
+
+# Ensure Python can import flow_planner for Hydra's pkg:// paths
+export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH}"
+
+# Put Ray temp/object store on the large disk to avoid "Local disk is full"
+export RAY_TMPDIR=/home/datasets_2/ray_tmp
+mkdir -p "${RAY_TMPDIR}"
+
+# Ray: disable dashboard/metrics to avoid exporter-agent init retries slowing down startup
+export RAY_DISABLE_DASHBOARD=1
+export RAY_USAGE_STATS_ENABLED=0
+export RAY_INCLUDE_DASHBOARD=false
+export RAY_ENABLE_METRICS_AGENT=false
+export RAY_METRICS_EXPORT_PORT=0
 
 # Dataset split to use
 # Options: 
@@ -25,9 +45,10 @@ export CHALLENGE="closed_loop_reactive_agents" # e.g., "closed_loop_nonreactive_
 ###################################
 
 
-BRANCH_NAME=flow_planner_release
-CONFIG_FILE=/home/qianzezhong/Flow-Planner/results/outputs/FlowPlannerTraining/flow_planner_standard/2025-11-30_02-26-51/.hydra/config.yaml # path of .hydra/config in ckpt folder
-CKPT_FILE=/home/qianzezhong/Flow-Planner/results/outputs/FlowPlannerTraining/flow_planner_standard/2025-11-30_02-26-51/latest.pth # path to the .pth of checkpoint
+# Base model checkpoint and config
+BRANCH_NAME=flow_planner_base
+CONFIG_FILE=/home/results/flow_planner/base_checkpoint/.hydra/config.yaml   # path of .hydra/config in ckpt folder
+CKPT_FILE=/home/results/flow_planner/base_checkpoint/latest.pth            # path to the .pth of checkpoint
 
 if [ "$SPLIT" == "val14" ]; then
     SCENARIO_BUILDER="nuplan"
