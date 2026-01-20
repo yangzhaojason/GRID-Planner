@@ -20,7 +20,14 @@ graph_weighting:
   alpha1: 0.1             # weight for structural centrality term Cent(tau)
   alpha2: 1.0             # weight for collision proxy CollProb(tau)
   cent_radius: 30.0       # [m] radius to count nearby agents for centrality
+  cent_sigma: 15.0        # [m] RBF kernel sigma for agent-agent graph edge weights
   collision_radius: 8.0   # [m] distance threshold for high collision risk
+  ttc_scale: 3.0          # [s] risk scale for TTC->prob mapping: exp(-TTC/ttc_scale)
+  lane_radius: 30.0       # [m] radius for lane complexity proxy
+  static_radius: 20.0     # [m] radius for static object complexity proxy
+  beta_lane: 0.25         # coefficient for log1p(#near_lanes)
+  beta_static: 0.15       # coefficient for log1p(#near_static_objects)
+  beta_red: 0.25          # coefficient for log1p(#red_lane_points)
   temperature: 1.0        # soft temperature on log-weights
   normalize_by_mean: true # normalize w so that mean weight is ~1
   max_weight: 10.0
