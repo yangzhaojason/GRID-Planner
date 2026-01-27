@@ -1,0 +1,190 @@
+import concurrent.futures
+import logging
+import time
+import traceback
+from typing import Dict, List, Optional, Tuple, Union
+
+from nuplan.planning.simulation.callback.metric_callback import MetricCallback
+from nuplan.planning.simulation.callback.simulation_log_callback import SimulationLogCallback
+from nuplan.planning.simulation.runner.abstract_runner import AbstractRunner
+from nuplan.planning.simulation.runner.runner_report import RunnerReport
+from nuplan.planning.simulation.runner.simulations_runner import SimulationRunner
+from nuplan.planning.utils.multithreading.worker_pool import Task, WorkerPool
+
+logger = logging.getLogger(__name__)
+
+
+def run_simulation(sim_runner: AbstractRunner, exit_on_failure: bool = False) -> RunnerReport:
+    """
+    Proxy for calling simulation.
+    :param sim_runner: A simulation runner which will execute all batched simulations.
+    :param exit_on_failure: If true, raises an exception when the simulation fails.
+    :return report for the simulation.
+    """
+    # Store start time so that if the simulations fail, we know how long they ran for
+    start_time = time.perf_counter()
+    try:
+        # RL: 支持对同一 scenario 做多次 rollout（不同 seed）。
+        # 若 runner 上设置了 rollout_seed，则在执行前设置全局随机种子。
+        if hasattr(sim_runner, "rollout_seed"):
+            rollout_seed = getattr(sim_runner, "rollout_seed")
+            assert isinstance(rollout_seed, int), f"rollout_seed must be int, got {type(rollout_seed)}"
+            import random
+            import numpy as np
+            import torch
+
+            random.seed(rollout_seed)
+            np.random.seed(rollout_seed)
+            torch.manual_seed(rollout_seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(rollout_seed)
+
+        report = sim_runner.run()
+
+        # 将 rollout 元信息附加到 report，便于上层按 scenario 聚合（不改 RunnerReport dataclass 定义）
+        if hasattr(sim_runner, "scenario_index"):
+            report.scenario_index = int(getattr(sim_runner, "scenario_index"))
+        if hasattr(sim_runner, "rollout_id"):
+            report.rollout_id = int(getattr(sim_runner, "rollout_id"))
+        if hasattr(sim_runner, "rollout_seed"):
+            report.rollout_seed = int(getattr(sim_runner, "rollout_seed"))
+
+        return report
+    except Exception as e:
+        error = traceback.format_exc()
+
+        # Print to the terminal
+        logger.warning("----------- Simulation failed: with the following trace:")
+        traceback.print_exc()
+        logger.warning(f"Simulation failed with error:\n {e}")
+
+        # Log the failed scenario log/tokens
+        failed_scenarios = f"[{sim_runner.scenario.log_name}, {sim_runner.scenario.scenario_name}]\n"
+        logger.warning(f"\nFailed simulation [log,token]:\n {failed_scenarios}")
+
+        logger.warning("----------- Simulation failed!")
+
+        # Fail if desired
+        if exit_on_failure:
+            raise RuntimeError('Simulation failed')
+
+        end_time = time.perf_counter()
+        report = RunnerReport(
+            succeeded=False,
+            error_message=error,
+            start_time=start_time,
+            end_time=end_time,
+            planner_report=None,
+            scenario_name=sim_runner.scenario.scenario_name,
+            planner_name=sim_runner.planner.name(),
+            log_name=sim_runner.scenario.log_name,
+            score=None,
+            rl_data=None,
+        )
+
+        return report
+
+
+def execute_runners(
+    runners: List[AbstractRunner],
+    worker: WorkerPool,
+    num_gpus: Optional[Union[int, float]],
+    num_cpus: Optional[int],
+    exit_on_failure: bool = False,
+    verbose: bool = False,
+) -> List[RunnerReport]:
+    """
+    Execute multiple simulation runners or metric runners.
+    :param runners: A list of simulations to be run.
+    :param worker: for submitting tasks.
+    :param num_gpus: if None, no GPU will be used, otherwise number (also fractional) of GPU used per simulation.
+    :param num_cpus: if None, all available CPU threads are used, otherwise number of threads used.
+    :param exit_on_failure: If true, raises an exception when the simulation fails.
+    """
+    # Validating
+    assert len(runners) > 0, 'No scenarios found to simulate!'
+
+    # Start simulations
+    number_of_sims = len(runners)
+    # logger.info(f"Starting {number_of_sims} simulations using {worker.__class__.__name__}!")
+    task = Task(fn=run_simulation, num_gpus=num_gpus, num_cpus=num_cpus)
+
+    # 逐个 Ray object 完成后立刻打印当前场景 score（非 RL 也打印）。
+    # Ray worker 支持 submit()，可以 as_completed 流式拿结果；其他 worker 可能不支持 submit，则退化为 map 后打印。
+    reports_by_idx: List[Optional[RunnerReport]] = [None] * len(runners)
+    try:
+        future_to_idx = {worker.submit(task, runner, exit_on_failure): idx for idx, runner in enumerate(runners)}
+        for fut in concurrent.futures.as_completed(list(future_to_idx.keys())):
+            report: RunnerReport = fut.result()
+            reports_by_idx[future_to_idx[fut]] = report
+            # logger.info(
+            #     "Simulation finished: scenario='%s', log='%s', planner='%s', succeeded=%s, score=%s",
+            #     report.scenario_name,
+            #     report.log_name,
+            #     report.planner_name,
+            #     report.succeeded,
+            #     report.score,
+            # )
+            # print("report.score {}".format(report.score))
+    except NotImplementedError:
+        mapped_reports = worker.map(task, runners, exit_on_failure, verbose=verbose)
+        assert len(mapped_reports) == len(runners), f"worker.map returned {len(mapped_reports)} reports for {len(runners)} runners"
+        reports_by_idx = list(mapped_reports)
+        # for report in reports:
+        #     # logger.info(
+        #     #     "Simulation finished: scenario='%s', log='%s', planner='%s', succeeded=%s, score=%s",
+        #     #     report.scenario_name,
+        #     #     report.log_name,
+        #     #     report.planner_name,
+        #     #     report.succeeded,
+        #     #     report.score,
+        #     # )
+        #     print("report.score {}".format(report.score))
+    # 确保所有 runner 都有 report（RL 多 rollout 时同一 scenario 可能出现重复，因此不能用 (scenario_name, planner, log) 去重）
+    assert all(r is not None for r in reports_by_idx), "Some runner reports are missing"
+
+    # Iterate over runners, finding the callbacks which may have run asynchronously, and gathering their results
+    callback_future_to_idx: Dict[Future[None], int] = {}
+    for idx, runner in enumerate(runners):
+        if not isinstance(runner, SimulationRunner):
+            continue
+        for callback in runner.simulation.callback.callbacks:
+            if isinstance(callback, MetricCallback) or isinstance(callback, SimulationLogCallback):
+                for future in callback.futures:
+                    callback_future_to_idx[future] = idx
+
+    for future in concurrent.futures.as_completed(list(callback_future_to_idx.keys())):
+        try:
+            future.result()
+        except Exception:
+            error_message = traceback.format_exc()
+            runner_report = reports_by_idx[callback_future_to_idx[future]]
+            assert runner_report is not None
+            runner_report.error_message = error_message
+            runner_report.succeeded = False
+            runner_report.end_time = time.perf_counter()
+
+    # Notify user about the result of simulations
+    failed_simulations = str()
+    number_of_successful = 0
+    runner_reports: List[RunnerReport] = [r for r in reports_by_idx if r is not None]
+    for result in runner_reports:
+        if result.succeeded:
+            number_of_successful += 1
+        else:
+            logger.warning("Failed Simulation.\n '%s'", result.error_message)
+            # RL 多 rollout：若存在 rollout_id/seed，附加到失败标识便于定位
+            rollout_suffix = ""
+            if hasattr(result, "rollout_id") or hasattr(result, "rollout_seed"):
+                rollout_suffix = f", rollout_id={getattr(result, 'rollout_id', None)}, seed={getattr(result, 'rollout_seed', None)}"
+            failed_simulations += f"[{result.log_name}, {result.scenario_name}{rollout_suffix}] \n"
+
+    number_of_failures = number_of_sims - number_of_successful
+    # logger.info(f"Number of successful simulations: {number_of_successful}")
+    # logger.info(f"Number of failed simulations: {number_of_failures}")
+
+    # Print out all failed simulation unique identifier
+    if number_of_failures > 0:
+        logger.info(f"Failed simulations [log, token]:\n{failed_simulations}")
+
+    return runner_reports
