@@ -1,0 +1,33 @@
+flow_planner:
+  _target_: flow_planner.planner.FlowPlanner
+  _convert_: "all"
+
+  config_path: ???
+  ckpt_path: ???
+
+  past_trajectory_sampling:
+    _target_: nuplan.planning.simulation.trajectory.trajectory_sampling.TrajectorySampling
+    _convert_: "all"
+
+    num_poses: 20
+    time_horizon: 2
+
+  future_trajectory_sampling:
+    _target_: nuplan.planning.simulation.trajectory.trajectory_sampling.TrajectorySampling
+    _convert_: "all"
+
+    num_poses: 80
+    time_horizon: 8
+
+  device: cuda
+  
+  rl:
+    enabled: false
+    batch_size: 64
+    micro_batch_size: 256
+    joint_logprob: false
+    noise_std: 0.05
+    clip_ratio: 0.01
+    save_interval: 100
+    output_dir: null
+    learning_rate: 1e-4
