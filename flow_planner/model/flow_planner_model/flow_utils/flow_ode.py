@@ -120,7 +120,14 @@ class FlowODE(Scheduler):
         x_init = x_init * self.sample_params['sample_temperature']
         step_size = 1.0 / self.sample_params['sample_steps']
         
-        logger.debug(f"generate_rl: sample_steps={self.sample_params['sample_steps']}, noise_std={self.rl_noise_std}")
+        # 仿真阶段加噪不需要梯度：这里显式 detach 并转为 float
+        noise_std = self.rl_noise_std
+        if isinstance(noise_std, torch.Tensor):
+            noise_std_value = float(noise_std.detach().cpu().item())
+        else:
+            noise_std_value = float(noise_std)
+
+        logger.debug(f"generate_rl: sample_steps={self.sample_params['sample_steps']}, noise_std={noise_std_value}")
         
         # 创建手动 ODE Solver
         manual_solver = ManualODESolver(
@@ -134,7 +141,7 @@ class FlowODE(Scheduler):
         sample, _ = manual_solver.sample_with_data_collection(
             x_init=x_init,
             num_steps=self.sample_params['sample_steps'],
-            noise_std=self.rl_noise_std,
+            noise_std=noise_std_value,
             data_collector=data_collector,
             condition=condition,
             **model_extra

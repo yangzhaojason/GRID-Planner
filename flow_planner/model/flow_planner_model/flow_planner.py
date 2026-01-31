@@ -29,7 +29,9 @@ class FlowPlanner(DiffusionADPlanner):
         
         device='cuda',
         rl_enabled=False,
-        rl_noise_std=0.05,
+        rl_noise_std=0,
+        rl_noise_std_min=None,
+        rl_noise_std_max=None,
         **planner_params
     ):
         
@@ -45,20 +47,34 @@ class FlowPlanner(DiffusionADPlanner):
         self.cfg_type = planner_params['cfg_type']
         
         self.rl_enabled = rl_enabled
-        # 可学习的noise_std参数，范围限制在[0.04, 0.08]
-        # 使用sigmoid将参数映射到[0,1]，然后缩放到[0.04, 0.08]
+        # 可学习的 noise_std 参数：范围由 rl_noise_std_min/max 指定（启动脚本注入），并通过 sigmoid 映射保证在区间内
         if rl_enabled:
-            # 初始化：将0.06映射到sigmoid空间
-            # 0.06 = 0.04 + (0.08 - 0.04) * sigmoid(logit)
-            # sigmoid(logit) = (0.06 - 0.04) / (0.08 - 0.04) = 0.5
-            # logit = logit(0.5) = 0.0
+            if rl_noise_std_min is None or rl_noise_std_max is None:
+                raise ValueError(
+                    "rl_enabled=True requires rl_noise_std_min and rl_noise_std_max. "
+                    "Please set planner.flow_planner.rl.noise_std_min/noise_std_max in the launch script."
+                )
+            self._rl_noise_std_min = float(rl_noise_std_min)
+            self._rl_noise_std_max = float(rl_noise_std_max)
+            if self._rl_noise_std_min <= 0 or self._rl_noise_std_max <= 0:
+                raise ValueError(f"rl_noise_std_min/max must be > 0, got {self._rl_noise_std_min}, {self._rl_noise_std_max}")
+            if self._rl_noise_std_min >= self._rl_noise_std_max:
+                raise ValueError(f"rl_noise_std_min must be < rl_noise_std_max, got {self._rl_noise_std_min} >= {self._rl_noise_std_max}")
+
+            # 初始化 logit：用区间中点 => sigmoid(logit)=0.5 => logit=0.0
             initial_logit = 0.0
             self.rl_noise_std_logit = nn.Parameter(torch.tensor(initial_logit, dtype=torch.float32))
             # 将FlowPlanner的引用传递给flow_ode，以便动态获取noise_std
             if hasattr(self.flow_ode, 'set_planner_ref'):
                 self.flow_ode.set_planner_ref(self)
         else:
-            self.rl_noise_std = rl_noise_std
+            # rl_noise_std 是 @property（只读），不能直接赋值；使用私有变量存放固定值
+            if not isinstance(rl_noise_std, (int, float)):
+                raise TypeError(f"rl_noise_std must be a number, got {type(rl_noise_std)}")
+            self._rl_noise_std = float(rl_noise_std)
+            # 同步到 flow_ode（非 RL 模式下它使用自己的 _rl_noise_std）
+            if hasattr(self.flow_ode, "_rl_noise_std"):
+                self.flow_ode._rl_noise_std = float(rl_noise_std)
 
         self.kinematic = kinematic
         
@@ -349,15 +365,17 @@ class FlowPlanner(DiffusionADPlanner):
     
     @property
     def rl_noise_std(self):
-        """获取可学习的noise_std值，范围限制在[0.04, 0.08]
-        
-        返回:
-            float: noise_std的值（在[0.04, 0.08]范围内）
+        """获取可学习的 noise_std（tensor），范围限制在 [0.04, 0.08]。
+
+        说明：
+        - 这里必须返回 torch.Tensor（而不是 .item() / float），否则会切断梯度，导致 noise_std 无法被学习。
+        - 若下游确实需要 Python float（例如仿真阶段加噪），应在调用点显式 detach 并转换。
         """
         if self.rl_enabled and hasattr(self, 'rl_noise_std_logit'):
-            # 使用sigmoid将logit映射到[0,1]，然后缩放到[0.04, 0.08]
-            noise_std = 0.04 + (0.08 - 0.04) * torch.sigmoid(self.rl_noise_std_logit)
-            # 返回float值（在训练和推理时都需要）
-            return noise_std.item() if isinstance(noise_std, torch.Tensor) else float(noise_std)
+            # 使用sigmoid将logit映射到[0,1]，然后缩放到[rl_noise_std_min, rl_noise_std_max]
+            noise_std = self._rl_noise_std_min + (self._rl_noise_std_max - self._rl_noise_std_min) * torch.sigmoid(self.rl_noise_std_logit)
+            # 数值安全：确保严格落在区间内
+            noise_std = torch.clamp(noise_std, min=self._rl_noise_std_min, max=self._rl_noise_std_max)
+            return noise_std
         else:
             return getattr(self, '_rl_noise_std', 0.05)

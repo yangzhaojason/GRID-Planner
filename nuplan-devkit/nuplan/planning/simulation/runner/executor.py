@@ -1,4 +1,5 @@
 import concurrent.futures
+from concurrent.futures import Future
 import logging
 import time
 import traceback
@@ -14,7 +15,12 @@ from nuplan.planning.utils.multithreading.worker_pool import Task, WorkerPool
 logger = logging.getLogger(__name__)
 
 
-def run_simulation(sim_runner: AbstractRunner, exit_on_failure: bool = False) -> RunnerReport:
+def run_simulation(
+    sim_runner: AbstractRunner,
+    exit_on_failure: bool = False,
+    rl_data_dir: Optional[str] = None,
+    rl_step: Optional[int] = None,
+) -> RunnerReport:
     """
     Proxy for calling simulation.
     :param sim_runner: A simulation runner which will execute all batched simulations.
@@ -48,6 +54,64 @@ def run_simulation(sim_runner: AbstractRunner, exit_on_failure: bool = False) ->
             report.rollout_id = int(getattr(sim_runner, "rollout_id"))
         if hasattr(sim_runner, "rollout_seed"):
             report.rollout_seed = int(getattr(sim_runner, "rollout_seed"))
+
+        # RL: 将 report.rl_data 落盘，避免通过 Ray object store 回传超大对象导致 spill/卡死
+        if rl_data_dir is not None and getattr(report, "rl_data", None) is not None:
+            if rl_step is None:
+                raise ValueError("rl_step must be provided when rl_data_dir is set")
+            if not isinstance(rl_step, int) or rl_step < 0:
+                raise ValueError(f"rl_step must be non-negative int, got {rl_step} ({type(rl_step)})")
+
+            import os
+            from pathlib import Path
+            from uuid import uuid4
+
+            import torch
+
+            rl_data = report.rl_data
+            if not isinstance(rl_data, list):
+                raise TypeError(f"report.rl_data must be a list, got {type(rl_data)}")
+
+            # 写入 scenario_index/rollout 信息到每个 datapoint，避免 driver 再次加载修改
+            scenario_index = getattr(report, "scenario_index", None)
+            rollout_id = getattr(report, "rollout_id", None)
+            rollout_seed = getattr(report, "rollout_seed", None)
+            if scenario_index is not None:
+                sidx = int(scenario_index)
+                for traj in rl_data:
+                    if not isinstance(traj, list):
+                        raise TypeError(f"rl_data trajectory must be list, got {type(traj)}")
+                    for dp in traj:
+                        if isinstance(dp, dict):
+                            dp["scenario_index"] = sidx
+                            if rollout_id is not None:
+                                dp["rollout_id"] = int(rollout_id)
+                            if rollout_seed is not None:
+                                dp["rollout_seed"] = int(rollout_seed)
+
+            # 生成文件名（可读 + 唯一）
+            def _safe(s: str) -> str:
+                return "".join((c if c.isalnum() else "_") for c in s)[:80]
+
+            log_name = _safe(getattr(report, "log_name", "log"))
+            scenario_name = _safe(getattr(report, "scenario_name", "scenario"))
+            rid = int(rollout_id) if rollout_id is not None else -1
+            uid = uuid4().hex
+
+            out_dir = Path(rl_data_dir) / f"step_{rl_step:06d}"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / f"{log_name}__{scenario_name}__rid{rid}__{uid}.pt"
+
+            # 原子写：先写临时文件再 rename
+            tmp_path = out_path.with_suffix(".pt.tmp")
+            torch.save(rl_data, tmp_path)
+            os.replace(tmp_path, out_path)
+
+            # 在 report 上只保留路径/统计，避免回传大对象
+            report.rl_data = None
+            report.rl_data_path = str(out_path)
+            report.rl_data_num_trajectories = int(len(rl_data))
+            report.rl_data_num_datapoints = int(sum(len(t) for t in rl_data))
 
         return report
     except Exception as e:
@@ -92,6 +156,8 @@ def execute_runners(
     num_cpus: Optional[int],
     exit_on_failure: bool = False,
     verbose: bool = False,
+    rl_data_dir: Optional[str] = None,
+    rl_step: Optional[int] = None,
 ) -> List[RunnerReport]:
     """
     Execute multiple simulation runners or metric runners.
@@ -113,7 +179,9 @@ def execute_runners(
     # Ray worker 支持 submit()，可以 as_completed 流式拿结果；其他 worker 可能不支持 submit，则退化为 map 后打印。
     reports_by_idx: List[Optional[RunnerReport]] = [None] * len(runners)
     try:
-        future_to_idx = {worker.submit(task, runner, exit_on_failure): idx for idx, runner in enumerate(runners)}
+        future_to_idx = {
+            worker.submit(task, runner, exit_on_failure, rl_data_dir, rl_step): idx for idx, runner in enumerate(runners)
+        }
         for fut in concurrent.futures.as_completed(list(future_to_idx.keys())):
             report: RunnerReport = fut.result()
             reports_by_idx[future_to_idx[fut]] = report
@@ -127,7 +195,7 @@ def execute_runners(
             # )
             # print("report.score {}".format(report.score))
     except NotImplementedError:
-        mapped_reports = worker.map(task, runners, exit_on_failure, verbose=verbose)
+        mapped_reports = worker.map(task, runners, exit_on_failure, rl_data_dir, rl_step, verbose=verbose)
         assert len(mapped_reports) == len(runners), f"worker.map returned {len(mapped_reports)} reports for {len(runners)} runners"
         reports_by_idx = list(mapped_reports)
         # for report in reports:

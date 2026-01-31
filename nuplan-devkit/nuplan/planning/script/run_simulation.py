@@ -174,6 +174,13 @@ def _run_rl_simulation(cfg: DictConfig, planners: Optional[Union[AbstractPlanner
             "metric_weights": metric_weights,
             "multiple_metrics": multiple_metrics,
         }
+
+    def _safe_uid(s: str) -> str:
+        # Avoid slashes and overly long names for /tmp paths
+        out = []
+        for c in s:
+            out.append(c if c.isalnum() or c in ("-", "_", ".") else "_")
+        return "".join(out)[:160] if len(out) > 0 else "rl"
     
     # 获取 RL 配置（从 cfg.planner.flow_planner.rl）
     if 'planner' in cfg and hasattr(cfg.planner, 'flow_planner') and hasattr(cfg.planner.flow_planner, 'rl'):
@@ -187,9 +194,117 @@ def _run_rl_simulation(cfg: DictConfig, planners: Optional[Union[AbstractPlanner
     batch_size = rl_cfg.batch_size
     rollouts_per_scenario = int(rl_cfg.get('rollouts_per_scenario', 1))
     assert rollouts_per_scenario > 1, f"rollouts_per_scenario must be > 1, got {rollouts_per_scenario}"
+
+    # ---------------------- torchrun / DDP orchestration ----------------------
+    # - 仅 rank0 负责 Ray 仿真与数据收集
+    # - 其它 rank 在仿真阶段等待（timeout=60min）
+    # - 仿真结束后，所有 rank 进行 DDP 训练（数据分片在 RLTrainer 内完成）
+    dist_enabled = False
+    rank = 0
+    world_size = 1
+    local_rank = 0
+    if "WORLD_SIZE" in os.environ:
+        try:
+            world_size_env = int(os.environ["WORLD_SIZE"])
+        except Exception as e:
+            raise ValueError(f"Invalid WORLD_SIZE='{os.environ['WORLD_SIZE']}'") from e
+        if world_size_env > 1:
+            import datetime
+            import torch.distributed as dist
+
+            backend = "nccl" if torch.cuda.is_available() else "gloo"
+            dist.init_process_group(backend=backend, timeout=datetime.timedelta(minutes=60))
+            dist_enabled = True
+            rank = dist.get_rank()
+            world_size = dist.get_world_size()
+            local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+            if torch.cuda.is_available():
+                torch.cuda.set_device(local_rank)
+
+    # 重要：torchrun 多进程下，Hydra 的 cfg.output_dir 可能每个 rank 不同。
+    # 为保证所有 rank 使用同一个共享路径，这里使用 rl_cfg.output_dir（由启动脚本显式指定）。
+    if not hasattr(rl_cfg, "output_dir") or rl_cfg.output_dir is None:
+        raise ValueError("planner.flow_planner.rl.output_dir must be set for torchrun shared payload exchange.")
+    # 注意：shared payload 可能很大（历史上包含 batch_data），强制写到 /tmp，避免写到当前工作目录或输出目录下导致磁盘压力/溢写。
+    tmp_root = Path(os.environ.get("FLOW_PLANNER_TMP_DIR", "/tmp"))
+    exp_uid = _safe_uid(str(cfg.experiment_uid)) if hasattr(cfg, "experiment_uid") else "rl"
+    shared_payload_path = tmp_root / "flow_planner_rl" / exp_uid / "rl_shared_payload.pt"
+    shared_payload_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # RL rollout 数据落盘目录（每个 runner 一个文件），统一放到 /tmp
+    rollout_root = tmp_root / "flow_planner_rl" / exp_uid / "rl_rollouts"
+    rollout_root.mkdir(parents=True, exist_ok=True)
     
     # Fix random seed（每次 rollout 的种子会在 executor.run_simulation 内单独设置）
-    pl.seed_everything(int(cfg.seed), workers=True)
+    pl.seed_everything(int(cfg.seed) + int(rank), workers=True)
+
+    # ---------------------- 非 rank0：不启动 Ray，不跑仿真，只等待并参与训练 ----------------------
+    if dist_enabled and rank != 0:
+        import torch.distributed as dist
+        from torch.nn.parallel import DistributedDataParallel as DDP
+        from nuplan.planning.script.builders.planner_builder import build_planners
+
+        # 构建 planner（FlowPlanner.requires_scenario=False，因此 scenario=None 可以）
+        if planners is None or (isinstance(planners, list) and len(planners) == 0):
+            if 'planner' not in cfg.keys():
+                raise KeyError('Planner not specified in config. Please specify a planner using "planner" field.')
+            planners = build_planners(cfg.planner, scenario=None)
+            if len(planners) == 0:
+                raise ValueError("Failed to build planners from config")
+
+        planner = planners[0] if isinstance(planners, list) else planners
+        model = planner._planner if hasattr(planner, "_planner") else planner
+
+        # 显式加载 ckpt（与 rank0 一致）
+        if hasattr(planner, '_ckpt_path') and planner._ckpt_path is not None and hasattr(planner, '_ema_enabled'):
+            state_dict = torch.load(planner._ckpt_path, weights_only=True, map_location=planner._device)
+            if planner._ema_enabled:
+                state_dict = state_dict['ema_state_dict']
+            else:
+                if "model" in state_dict.keys():
+                    state_dict = state_dict['model']
+            has_module_prefix = any(k.startswith("module.") for k in state_dict.keys())
+            if has_module_prefix:
+                model_state_dict = {k[len("module."):]: v for k, v in state_dict.items() if k.startswith("module.")}
+            else:
+                model_state_dict = state_dict
+            model.load_state_dict(model_state_dict, strict=False)
+            model.eval()
+            model.to(planner._device)
+
+        # DDP wrap（每个 rank 使用自己的 local_rank 设备）
+        if torch.cuda.is_available():
+            device = torch.device(f"cuda:{local_rank}")
+            model = model.to(device)
+            model = DDP(model, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
+        else:
+            device = planner._device
+            model = DDP(model, broadcast_buffers=False)
+
+        lr = rl_cfg.get('learning_rate', 1e-4)
+        optimizer = optim.AdamW(model.parameters(), lr=lr)
+        rl_trainer = RLTrainer(model=model, optimizer=optimizer, rl_cfg=rl_cfg, device=device)
+
+        step_count = 0
+        while True:
+            dist.barrier()
+            payload = torch.load(shared_payload_path, map_location="cpu")
+            if not isinstance(payload, dict) or "train_ok" not in payload:
+                raise TypeError(f"Invalid shared payload: {type(payload)}")
+            if bool(payload["train_ok"]):
+                if "rollout_index" not in payload:
+                    raise KeyError("Shared payload missing 'rollout_index'")
+                rl_trainer.train_step_from_rollout_index(
+                    payload["rollout_index"],
+                    payload["scenario_score_means"],
+                    payload["scenario_score_stds"],
+                    step_count,
+                )
+            dist.barrier()
+            step_count += 1
+            if hasattr(rl_cfg, 'max_steps') and step_count >= rl_cfg.max_steps:
+                break
+        return
     
     # 获取所有 scenarios（用于 batch 分组）
     profiler_name = 'building_simulation'
@@ -263,12 +378,38 @@ def _run_rl_simulation(cfg: DictConfig, planners: Optional[Union[AbstractPlanner
         else:
             if "model" in state_dict.keys():
                 state_dict = state_dict['model']
-        # use for ddp
-        model_state_dict = {k[len("module."):]: v for k, v in state_dict.items() if k.startswith("module.")}
-        model.load_state_dict(model_state_dict)
+        # use for ddp: 处理module.前缀
+        # 检查是否有module.前缀的key
+        has_module_prefix = any(k.startswith("module.") for k in state_dict.keys())
+        if has_module_prefix:
+            # 如果有module.前缀，只取带前缀的key并去掉前缀
+            model_state_dict = {k[len("module."):]: v for k, v in state_dict.items() if k.startswith("module.")}
+        else:
+            # 如果没有module.前缀，直接使用所有key
+            model_state_dict = state_dict
+        
+        # 允许部分加载（strict=False），以兼容旧checkpoint中缺少新参数（如rl_noise_std_logit）的情况
+        missing_keys, unexpected_keys = model.load_state_dict(model_state_dict, strict=False)
+        if missing_keys:
+            logger.warning(f"Missing keys when loading checkpoint (will use default values): {missing_keys}")
+        if unexpected_keys:
+            logger.warning(f"Unexpected keys in checkpoint (will be ignored): {unexpected_keys}")
         model.eval()
         model.to(planner._device)
     
+    # DDP（rank0）：训练阶段使用 DistributedDataParallel
+    if dist_enabled:
+        from torch.nn.parallel import DistributedDataParallel as DDP
+        if torch.cuda.is_available():
+            device = torch.device(f"cuda:{local_rank}")
+            model = model.to(device)
+            model = DDP(model, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
+        else:
+            device = planner._device
+            model = DDP(model, broadcast_buffers=False)
+    else:
+        device = planner._device
+
     # 创建优化器（从配置读取或使用默认值）
     lr = rl_cfg.get('learning_rate', 1e-4)
     optimizer = optim.AdamW(model.parameters(), lr=lr)
@@ -278,7 +419,7 @@ def _run_rl_simulation(cfg: DictConfig, planners: Optional[Union[AbstractPlanner
         model=model,
         optimizer=optimizer,
         rl_cfg=rl_cfg,
-        device=planner._device
+        device=device
     )
     
     # Build simulation callbacks（在循环外构建一次，可以复用）
@@ -299,6 +440,14 @@ def _run_rl_simulation(cfg: DictConfig, planners: Optional[Union[AbstractPlanner
     while True:
         t_step0 = time.perf_counter()
         logger.info(f"RL Training Step {step_count}")
+
+        # 每 50 步强制重置 optimizer（清空动量/二阶矩等状态）
+        # 注意：step_count 从 0 开始，因此 step_count=0 也会触发一次“重置”（等价于重新初始化）
+        if step_count % 50 == 0:
+            optimizer = optim.AdamW(model.parameters(), lr=lr)
+            rl_trainer.optimizer = optimizer
+            logger.info(f"Optimizer reset at step {step_count} (every 50 steps)")
+
         # 获取当前 batch 的 scenarios（循环使用所有 batches）
         batch_idx = step_count % len(scenario_batches)
         current_batch_scenarios = scenario_batches[batch_idx]
@@ -438,6 +587,12 @@ def _run_rl_simulation(cfg: DictConfig, planners: Optional[Union[AbstractPlanner
         
         if len(runners) == 0:
             logger.warning("No runners created for current batch")
+            if dist_enabled:
+                import torch.distributed as dist
+
+                torch.save({"train_ok": False}, shared_payload_path)
+                dist.barrier()
+                dist.barrier()
             step_count += 1
             continue
         
@@ -451,6 +606,8 @@ def _run_rl_simulation(cfg: DictConfig, planners: Optional[Union[AbstractPlanner
                 num_cpus=cfg.number_of_cpus_allocated_per_simulation,
                 exit_on_failure=cfg.exit_on_failure,
                 verbose=cfg.verbose,
+                rl_data_dir=str(rollout_root),
+                rl_step=int(step_count),
             )
         t_execute = time.perf_counter() - t_execute0
 
@@ -486,7 +643,7 @@ def _run_rl_simulation(cfg: DictConfig, planners: Optional[Union[AbstractPlanner
         # 收集每个 scenario 的多次 rollout scores，并计算 per-scenario mean/std（用于 GRPO）
         t_gather0 = time.perf_counter()
         scenario_scores: List[List[float]] = [[] for _ in range(batch_size)]
-        batch_data = []
+        rollout_index = []
         
         # logger.info(f"Step {step_count}: Processing {len(reports)} reports")
         
@@ -501,35 +658,48 @@ def _run_rl_simulation(cfg: DictConfig, planners: Optional[Union[AbstractPlanner
             if sidx < 0 or sidx >= batch_size:
                 raise ValueError(f"Invalid scenario_index {sidx} (batch_size={batch_size})")
             scenario_scores[sidx].append(float(report.score))
+
+            # RL 数据必须已落盘：只回传路径/索引，避免 Ray object store spill
+            rl_data_path = getattr(report, "rl_data_path", None)
+            if rl_data_path is None:
+                logger.warning(
+                    "Step %s: RunnerReport missing 'rl_data_path' (scenario_index=%s, scenario='%s', log='%s'). "
+                    "This means RL rollout did not get written to disk. Skip this step.",
+                    step_count,
+                    getattr(report, "scenario_index", None),
+                    getattr(report, "scenario_name", None),
+                    getattr(report, "log_name", None),
+                )
+                all_ok = False
+                break
+            num_traj = getattr(report, "rl_data_num_trajectories", None)
+            num_dp = getattr(report, "rl_data_num_datapoints", None)
+            if num_traj is None or num_dp is None:
+                logger.warning(
+                    "Step %s: RunnerReport missing rl_data_num_trajectories/rl_data_num_datapoints "
+                    "(scenario_index=%s, scenario='%s', log='%s'). Skip this step.",
+                    step_count,
+                    getattr(report, "scenario_index", None),
+                    getattr(report, "scenario_name", None),
+                    getattr(report, "log_name", None),
+                )
+                all_ok = False
+                break
+            rollout_index.append(
+                {
+                    "path": str(rl_data_path),
+                    "scenario_index": int(getattr(report, "scenario_index")),
+                    "rollout_id": int(getattr(report, "rollout_id", -1)) if hasattr(report, "rollout_id") else -1,
+                    "rollout_seed": int(getattr(report, "rollout_seed", -1)) if hasattr(report, "rollout_seed") else -1,
+                    "num_trajectories": int(num_traj),
+                    "num_datapoints": int(num_dp),
+                }
+            )
         
         # logger.info(f"Step {step_count}: Collected {len(scores)} scores from {len(reports)} reports")
         
-        # 从 reports 中获取 RL 数据（因为 Ray 分布式执行，数据在 worker 进程中，需要通过 report 传回）
-        runners_with_data = 0
-        runners_without_data = 0
-        total_data_points = 0
-        
-        for report in reports:
-            if report.rl_data is not None and len(report.rl_data) > 0:
-                runners_with_data += 1
-                data_points = sum(len(sim_data) for sim_data in report.rl_data)
-                total_data_points += data_points
-                if not hasattr(report, "scenario_index"):
-                    raise AttributeError("RunnerReport missing scenario_index while processing rl_data.")
-                scenario_idx = int(getattr(report, "scenario_index"))
-                # 写入 scenario_index：同一 batch 内 0..batch_size-1，供按 scenario mean/std 标准化
-                for sim_data in report.rl_data:
-                    for dp in sim_data:
-                        if isinstance(dp, dict):
-                            dp['scenario_index'] = scenario_idx
-                batch_data.extend(report.rl_data)
-                logger.debug(
-                    f"Step {step_count}: Report ({report.scenario_name}) scenario_index={scenario_idx} "
-                    f"has {len(report.rl_data)} simulation batches, {data_points} total data points"
-                )
-            else:
-                runners_without_data += 1
-                # no-op
+        # 统计：rollout_index 已包含每个 runner 的 traj/datapoints 计数
+        total_data_points = int(sum(int(item["num_datapoints"]) for item in rollout_index))
         t_gather = time.perf_counter() - t_gather0
         
         # logger.info(f"Step {step_count}: Data collection summary:")
@@ -538,8 +708,14 @@ def _run_rl_simulation(cfg: DictConfig, planners: Optional[Union[AbstractPlanner
         # logger.info(f"  Total simulation batches: {len(batch_data)}")
         # logger.info(f"  Total data points: {total_data_points}")
         
-        if (not all_ok) or len(batch_data) == 0:
-            logger.warning(f"Step {step_count}: No valid data collected (data batches: {len(batch_data)})")
+        if (not all_ok) or len(rollout_index) == 0:
+            logger.warning(f"Step {step_count}: No valid data collected (rollout files: {len(rollout_index)})")
+            if dist_enabled:
+                import torch.distributed as dist
+
+                torch.save({"train_ok": False}, shared_payload_path)
+                dist.barrier()
+                dist.barrier()
             step_count += 1
             continue
 
@@ -583,13 +759,53 @@ def _run_rl_simulation(cfg: DictConfig, planners: Optional[Union[AbstractPlanner
         t_score_stats = time.perf_counter() - t_score_stats0
 
         if not all_ok:
+            if dist_enabled:
+                import torch.distributed as dist
+
+                torch.save({"train_ok": False}, shared_payload_path)
+                dist.barrier()
+                dist.barrier()
             step_count += 1
             continue
         
-        # 训练
+        # 训练前：将数据写给其它 rank，然后一起进入训练
+        if dist_enabled:
+            import torch.distributed as dist
+
+            torch.save(
+                {
+                    "train_ok": True,
+                    "rollout_index": rollout_index,
+                    "scenario_score_means": scenario_score_means,
+                    "scenario_score_stds": scenario_score_stds,
+                },
+                shared_payload_path,
+            )
+            dist.barrier()
+
+        # 训练（DDP：所有 rank 同步进行，数据分片在 RLTrainer 内完成）
         t_train0 = time.perf_counter()
-        rl_trainer.train_step(batch_data, scenario_score_means, scenario_score_stds, step_count)
+        rl_trainer.train_step_from_rollout_index(rollout_index, scenario_score_means, scenario_score_stds, step_count)
         t_train = time.perf_counter() - t_train0
+
+        if dist_enabled:
+            import torch.distributed as dist
+
+            dist.barrier()
+
+        # 清理本 step 的 rollout 文件（默认不保留，避免 /tmp 爆炸）
+        keep_files = False
+        if hasattr(rl_cfg, "__contains__") and ("keep_rollout_files" in rl_cfg):
+            k = rl_cfg["keep_rollout_files"]
+            if not isinstance(k, bool):
+                raise TypeError(f"planner.flow_planner.rl.keep_rollout_files must be bool, got {type(k)}")
+            keep_files = k
+        if not keep_files:
+            from shutil import rmtree
+
+            step_dir = rollout_root / f"step_{int(step_count):06d}"
+            if step_dir.exists():
+                rmtree(step_dir)
 
         t_total = time.perf_counter() - t_step0
         # logger.info(

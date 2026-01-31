@@ -2,6 +2,7 @@ rl:
   enabled: false  # RL 模式总开关
   batch_size: 64  # 每次 simulate 的场景数量
   micro_batch_size: 256  # 训练时的 micro batch 大小
+  gradient_accumulate_step: 4  # 梯度累积：每 N 个 micro-batch 做一次 optimizer.step()
   joint_logprob: false  # 若为 true：按“同一条轨迹的多步去噪 logprob 求和”计算 PPO ratio（不打散 steps）
   noise_std: 0.05  # 加噪标准差
   clip_ratio: 0.01  # PPO clip ratio
