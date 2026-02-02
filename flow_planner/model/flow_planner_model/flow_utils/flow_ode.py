@@ -46,7 +46,7 @@ class FlowODE(Scheduler):
         else:
             # 使用固定值
             return self._rl_noise_std
-    
+
     def sample(self, x_data, target_type):
         B = x_data.shape[0]
         t = self.time_sampler.sample(B).to(x_data.device)
@@ -66,19 +66,10 @@ class FlowODE(Scheduler):
         '''
         Sample a the data using the model_fn. If use_cfg, the predicted velocity will be chunked and treats the first chunk as conditioned velocity, the second as unconditioned one.
         '''
-        import logging
-        logger = logging.getLogger(__name__)
-        
-        # 检查是否是 RL 模式
-        data_collector = model_extra.get('data_collector', None)
-        # logger.info(f"flow_ode.generate: rl_enabled={self.rl_enabled}, data_collector={data_collector}, use_cfg={use_cfg}")
-        
-        if self.rl_enabled and data_collector is not None:
-            # logger.info("flow_ode.generate: Calling generate_rl")
+        if self.rl_enabled:
+            if 'data_collector' not in model_extra:
+                raise ValueError("FlowODE.generate: rl_enabled=True but data_collector is missing in model_extra")
             return self.generate_rl(x_init, model_fn, model_pred_type, use_cfg, **model_extra)
-        elif self.rl_enabled and data_collector is None:
-            logger.error("flow_ode.generate: RL enabled but data_collector is None! This should not happen.")
-        
         velocity_func = self.translation_funcs[(model_pred_type, 'velocity')]
         velocity_model = VelocityModel(model_fn, self.path, velocity_func, use_cfg=use_cfg, cfg_weight=self.cfg_weight)
         
@@ -99,20 +90,13 @@ class FlowODE(Scheduler):
         
         说明：RL 模式同样支持 CFG（classifier-free guidance）。
         '''
-        import logging
-        logger = logging.getLogger(__name__)
-        
         from flow_planner.model.flow_planner_model.flow_utils.manual_ode_solver import ManualODESolver
         
         # 获取数据收集器和 condition
-        data_collector = model_extra.pop('data_collector', None)
-        condition = model_extra.pop('condition', {})
-        
-        logger.debug(f"generate_rl: data_collector={data_collector}, condition keys={list(condition.keys()) if condition else None}")
-        
-        if data_collector is None:
-            logger.error("generate_rl: data_collector is None! This should not happen in RL mode.")
-            raise ValueError("data_collector cannot be None in RL mode")
+        if 'data_collector' not in model_extra:
+            raise ValueError("FlowODE.generate_rl: data_collector is missing (RL mode requires it)")
+        data_collector = model_extra.pop('data_collector')
+        condition = model_extra.pop('condition') if 'condition' in model_extra else {}
         
         velocity_func = self.translation_funcs[(model_pred_type, 'velocity')]
         velocity_model = VelocityModel(model_fn, self.path, velocity_func, use_cfg=use_cfg, cfg_weight=self.cfg_weight)
@@ -126,8 +110,6 @@ class FlowODE(Scheduler):
             noise_std_value = float(noise_std.detach().cpu().item())
         else:
             noise_std_value = float(noise_std)
-
-        logger.debug(f"generate_rl: sample_steps={self.sample_params['sample_steps']}, noise_std={noise_std_value}")
         
         # 创建手动 ODE Solver
         manual_solver = ManualODESolver(
@@ -146,9 +128,6 @@ class FlowODE(Scheduler):
             condition=condition,
             **model_extra
         )
-        
-        logger.debug(f"generate_rl: completed, data_collector.current_simulation_data size: {len(data_collector.current_simulation_data)}")
-        
         return sample
     
     def identity(self, x, xt, t):

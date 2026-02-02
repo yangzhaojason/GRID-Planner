@@ -2,7 +2,7 @@
 <h3>Flow Matching-Based Autonomous Driving Planning</br>
 with Advanced Interactive Behavior Modeling</h3>
 
-[Tianyi Tan](https://github.com/0ttwhy4)\*, [Yinan Zheng](https://github.com/ZhengYinan-AIR)\*, [Ruiming Liang](https://github.com/LRMbbj), [Zexu Wang](https://github.com/ZexuWang), [Kexin Zheng](https://github.com/Whiterrrrr), [Jinliang Zheng](https://github.com/2toinf), [Jianxiong Li](https://facebear-ljx.github.io/), [Xianyuan Zhan](https://zhanzxy5.github.io/zhanxianyuan/), [Jingjing Liu](https://air.tsinghua.edu.cn/en/info/1046/1194.htm)
+[Tianyi Tan](https://github.com/0ttwhy4)\*, [Yinan Zheng](https://github.com/ZhengYinan-AIR)\*, [Ruiming Liang](https://github.com/LRMbbj), [Zexu Wang](https://github.com/ZexuWang), [Kexin Zheng](https://air-dream.netlify.app/author/kexin-zheng/), [Jinliang Zheng](https://github.com/2toinf), [Jianxiong Li](https://facebear-ljx.github.io/), [Xianyuan Zhan](https://zhanzxy5.github.io/zhanxianyuan/), [Jingjing Liu](https://air.tsinghua.edu.cn/en/info/1046/1194.htm)
 
 
 [**[Arxiv]**](https://arxiv.org/pdf/2510.11083)

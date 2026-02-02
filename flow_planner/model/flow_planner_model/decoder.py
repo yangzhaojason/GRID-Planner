@@ -109,66 +109,31 @@ class FlowPlannerDecoder(nn.Module):
             - 'routes_cond': tensor of shape (B, hidden_dim) for route conditions
         '''
 
-        # 断言：检查输入形状
-        assert x.dim() == 4, f"x should be 4D (B, P, T, D), got {x.dim()}D, shape={x.shape}"
-        assert t.dim() == 1, f"t should be 1D (B,), got {t.dim()}D, shape={t.shape}"
-        # assert t.shape[0] == x.shape[0], f"t batch size {t.shape[0]} != x batch size {x.shape[0]}"
-        
-        B, P, _, _ = x.shape
-        # 检查 x 的形状：如果 T*D 不等于 output_dim，可能需要 reshape
-        # output_dim = action_len * state_dim = 20 * 4 = 80
-        # 如果 x 是 (B, P, T, D) 且 T*D != 80，可能需要特殊处理
-        T_D = x.shape[2] * x.shape[3]
-        if T_D != self.output_dim:
-            # 如果 T*D = 140*4 = 560，但 output_dim = 80，说明 P 和 T 被合并了
-            # 需要 reshape 为 (B, 7, 20, 4) 然后 flatten
-            if T_D == 560 and P == 1:
-                # reshape 为 (B, 7, 20, 4)
-                x = x.reshape(B, 7, 20, 4)
-                P = 7
-            elif T_D == 140 and P == 1:
-                # 如果 T=140, D=4，reshape 为 (B, 7, 20, 4)
-                x = x.reshape(B, 7, 20, 4)
-                P = 7
-        
-        x = x.to(torch.float32)
-        x = x.reshape(B, P, -1)
-        
-        # 断言：检查 x reshape 后的形状
-        assert x.shape[2] == self.output_dim, f"x reshape后第三维应该是 output_dim={self.output_dim}, got {x.shape[2]}"
-        
-        encodings = list(model_extra['encodings'])
-        
-        # 断言：检查 encodings
-        # encoder 输出的 encodings 只有 2 个 modality：
-        #   0: neighbors + static（已 concat）
-        #   1: lanes
-        # 第 3 个 modality（ego trajectory tokens）由 decoder 这里的 preproj(x) 追加
-        assert isinstance(encodings, (list, tuple)), f"encodings should be list/tuple, got {type(encodings)}"
-        expected_pre_modalities = self.dit.blocks[0].num_modalities - 1  # 追加 ego traj 之前应有的 modality 数
-        assert len(encodings) == expected_pre_modalities, (
-            f"encodings should have {expected_pre_modalities} elements before appending ego traj, got {len(encodings)}"
-        )
-        for i, enc in enumerate(encodings):
-            assert isinstance(enc, torch.Tensor), f"encodings[{i}] should be tensor, got {type(enc)}"
-            assert enc.dim() == 3, f"encodings[{i}] should be 3D (B, num_tokens, hidden_dim), got {enc.dim()}D, shape={enc.shape}"
-            assert enc.shape[0] == B, f"encodings[{i}] batch size {enc.shape[0]} != B {B}"
+        if x.dim() != 4:
+            raise ValueError(f"x should be 4D (B, P, T, D), got {x.dim()}D, shape={x.shape}")
+        B, P, T, D = x.shape
+        x = x.to(torch.float32).reshape(B, P, -1)
+        if x.shape[2] != self.output_dim:
+            raise ValueError(
+                f"Unexpected x flattened dim: got {x.shape[2]}, expected output_dim={self.output_dim}. "
+                f"Original x.shape={(B, P, T, D)}"
+            )
+
+        encodings = list(model_extra['encodings'])  # modalities from encoder
+        expected_pre_modalities = self.dit.blocks[0].num_modalities - 1
+        if len(encodings) != expected_pre_modalities:
+            raise ValueError(
+                f"encodings should have {expected_pre_modalities} elements before appending ego traj, got {len(encodings)}"
+            )
 
         attn_dist = model_extra['token_dist']
-        # 断言：检查 attn_dist
-        assert isinstance(attn_dist, torch.Tensor), f"attn_dist should be tensor, got {type(attn_dist)}"
-        assert attn_dist.shape[0] == B, f"attn_dist batch size {attn_dist.shape[0]} != B {B}"
-
         masks = list(model_extra['masks'])
-        # 断言：检查 masks（与 encodings 对齐，进入 decoder 时应为 2 个 modality）
-        assert isinstance(masks, (list, tuple)), f"masks should be list/tuple, got {type(masks)}"
-        assert len(masks) == expected_pre_modalities, (
-            f"masks should have {expected_pre_modalities} elements before appending ego traj, got {len(masks)}"
-        )
+        if len(masks) != expected_pre_modalities:
+            raise ValueError(
+                f"masks should have {expected_pre_modalities} elements before appending ego traj, got {len(masks)}"
+            )
 
         cfg_flags = model_extra['cfg_flags']
-        # 确保 cfg_flags 是 tensor 并且在正确的设备上
-        # 使用 cfg_embedding 的权重设备，确保与模型参数在同一设备上
         target_device = next(self.cfg_embedding.parameters()).device
         if not isinstance(cfg_flags, torch.Tensor):
             cfg_flags = torch.tensor(cfg_flags, device=target_device, dtype=torch.int32)
@@ -182,14 +147,11 @@ class FlowPlannerDecoder(nn.Module):
         x = self.preproj(x)
         encodings.append(x)
         masks.append(None)
-
-        # 断言：append ego traj 后应与 DiT 的 modality 数一致
-        assert len(encodings) == self.dit.blocks[0].num_modalities, (
-            f"after appending ego traj, encodings should have {self.dit.blocks[0].num_modalities} modalities, got {len(encodings)}"
-        )
-        assert len(masks) == self.dit.blocks[0].num_modalities, (
-            f"after appending ego traj, masks should have {self.dit.blocks[0].num_modalities} modalities, got {len(masks)}"
-        )
+        if len(encodings) != self.dit.blocks[0].num_modalities or len(masks) != self.dit.blocks[0].num_modalities:
+            raise ValueError(
+                f"Unexpected modalities after append: encodings={len(encodings)}, masks={len(masks)}, "
+                f"expected={self.dit.blocks[0].num_modalities}"
+            )
         
         time_cond = self.t_embedder(t).unsqueeze(1)
         routes_cond = routes_cond.unsqueeze(1)        

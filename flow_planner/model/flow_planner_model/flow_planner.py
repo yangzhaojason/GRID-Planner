@@ -150,7 +150,7 @@ class FlowPlanner(DiffusionADPlanner):
         if mode == 'train':
             return self.forward_train(data)
         elif mode == 'inference':
-            data_collector = params.get('data_collector', None)
+            data_collector = params['data_collector'] if 'data_collector' in params else None
             return self.forward_inference(data, params['use_cfg'], params['cfg_weight'], data_collector=data_collector)
     
     def forward_train(self, data: NuPlanDataSample):
@@ -188,7 +188,12 @@ class FlowPlanner(DiffusionADPlanner):
         batch_loss = self.basic_loss(prediction, target_tokens)
         loss_dict['batch_loss'] = batch_loss
         
-        loss = torch.sum(batch_loss, dim=-1) # (B, action_num, action_length, dim)
+        # aggregate loss over token/time dimensions
+        loss = torch.sum(batch_loss, dim=-1) # (B, action_num, action_length)
+        # per-sample planning loss for graph-aware weighting
+        loss_per_sample = loss.view(B, -1).mean(dim=1)  # (B,)
+        loss_dict['ego_planning_loss_per_sample'] = loss_per_sample
+        # vanilla mean loss kept for compatibility (may be overridden by core)
         loss_dict['ego_planning_loss'] = loss.mean()
 
         if self.planner_params['action_overlap'] > 0:
@@ -202,10 +207,9 @@ class FlowPlanner(DiffusionADPlanner):
         return prediction, loss_dict
     
     def forward_inference(self, data: NuPlanDataSample, use_cfg=True, cfg_weight=None, data_collector=None):
-        # 检查是否是 RL 模式
+        # RL 模式下使用自定义采样并收集数据
         if self.rl_enabled:
             return self.forward_inference_rl(data, use_cfg=use_cfg, cfg_weight=cfg_weight, data_collector=data_collector)
-        
         B = data.ego_current.shape[0]
         if use_cfg:
             cfg_flags = torch.cat([torch.ones((B,), device=self.device), torch.zeros((B,), device=self.device)], dim=0).to(torch.int32)
@@ -365,7 +369,7 @@ class FlowPlanner(DiffusionADPlanner):
     
     @property
     def rl_noise_std(self):
-        """获取可学习的 noise_std（tensor），范围限制在 [0.04, 0.08]。
+        """获取 noise_std（torch.Tensor）。
 
         说明：
         - 这里必须返回 torch.Tensor（而不是 .item() / float），否则会切断梯度，导致 noise_std 无法被学习。
@@ -378,4 +382,4 @@ class FlowPlanner(DiffusionADPlanner):
             noise_std = torch.clamp(noise_std, min=self._rl_noise_std_min, max=self._rl_noise_std_max)
             return noise_std
         else:
-            return getattr(self, '_rl_noise_std', 0.05)
+            return self._rl_noise_std

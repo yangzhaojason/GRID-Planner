@@ -66,11 +66,11 @@ class FlowPlanner(AbstractPlanner):
         # RL 配置
         if rl is None:
             rl = {}
-        self._rl_enabled = rl.get('enabled', False)
+        self._rl_enabled = bool(rl['enabled']) if 'enabled' in rl else False
         # RL_NOISE_STD 已弃用：改为使用 learnable noise_std 的范围 [noise_std_min, noise_std_max]
-        self._rl_noise_std_min = rl.get('noise_std_min', None)
-        self._rl_noise_std_max = rl.get('noise_std_max', None)
-        self._rl_noise_std = rl.get('noise_std', None)  # 兼容旧 key（不再推荐）
+        self._rl_noise_std_min = rl['noise_std_min'] if 'noise_std_min' in rl else None
+        self._rl_noise_std_max = rl['noise_std_max'] if 'noise_std_max' in rl else None
+        self._rl_noise_std = rl['noise_std'] if 'noise_std' in rl else None  # 兼容旧 key（不再推荐）
         
         # 初始化 RL 数据收集器
         if self._rl_enabled:
@@ -262,8 +262,6 @@ class FlowPlanner(AbstractPlanner):
         return data
 
     def outputs_to_trajectory(self, outputs: Dict[str, torch.Tensor], ego_state_history: Deque[EgoState]) -> List[InterpolatableState]:    
-        import logging
-        logger = logging.getLogger(__name__)
         predictions = outputs[0, 0].detach().cpu().numpy().astype(np.float64) # T, 4
         
         # 检查 predictions 是否包含 NaN 或 Inf
@@ -293,6 +291,10 @@ class FlowPlanner(AbstractPlanner):
                     else:
                         heading[i, 0] = default_heading
         
+
+        predictions = outputs[0, 0].detach().cpu().numpy().astype(np.float64) # T, 4
+        heading = np.arctan2(predictions[:, 3], predictions[:, 2])[..., None]
+
         predictions = np.concatenate([predictions[..., :2], heading], axis=-1) 
 
         states = transform_predictions_to_states(predictions, ego_state_history, self._future_horizon, self._step_interval)
@@ -322,33 +324,16 @@ class FlowPlanner(AbstractPlanner):
 
         说明：RL 模式下同样支持 CFG（classifier-free guidance）。
         """
-        import logging
-        logger = logging.getLogger(__name__)
-        
         inputs = self.planner_input_to_model_inputs(current_input)
-
-        # 在调用前检查数据收集器状态
-        if self._rl_data_collector is not None:
-            current_data_before = len(self._rl_data_collector.current_simulation_data)
-            logger.debug(f"compute_planner_trajectory_rl: before inference, current_data_size={current_data_before}")
-        else:
-            logger.error("compute_planner_trajectory_rl: _rl_data_collector is None!")
 
         # RL 模式：传递 data_collector（同时支持 CFG）
         outputs = self.core.inference(
             self._planner, 
             inputs, 
-            use_cfg=True,
+            use_cfg=self.use_cfg,
             cfg_weight=self.cfg_weight,
             data_collector=self._rl_data_collector
         )
-
-        # 在调用后检查数据收集器状态
-        if self._rl_data_collector is not None:
-            current_data_after = len(self._rl_data_collector.current_simulation_data)
-            logger.debug(f"compute_planner_trajectory_rl: after inference, current_data_size={current_data_after}")
-            if current_data_after == current_data_before:
-                logger.warning(f"compute_planner_trajectory_rl: No data collected! (before={current_data_before}, after={current_data_after})")
 
         trajectory = InterpolatedTrajectory(
             trajectory=self.outputs_to_trajectory(outputs, current_input.history.ego_states)
@@ -358,13 +343,6 @@ class FlowPlanner(AbstractPlanner):
     
     def get_rl_data_collector(self):
         """获取 RL 数据收集器"""
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.debug(f"get_rl_data_collector called: rl_enabled={self._rl_enabled}, collector={self._rl_data_collector}")
-        if self._rl_data_collector is not None:
-            batch_data = self._rl_data_collector.get_batch_data()
-            current_data = len(self._rl_data_collector.current_simulation_data)
-            logger.debug(f"  Current batch_data size: {len(batch_data)}, current_simulation_data size: {current_data}")
         return self._rl_data_collector
     
     def finalize_rl_simulation(self, score: float):
@@ -374,15 +352,8 @@ class FlowPlanner(AbstractPlanner):
         Args:
             score: float - 该 simulation 的最终 score
         """
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.debug(f"finalize_rl_simulation called: rl_enabled={self._rl_enabled}, score={score}, collector={self._rl_data_collector}")
         if self._rl_enabled and self._rl_data_collector is not None:
-            current_data_size = len(self._rl_data_collector.current_simulation_data)
-            logger.debug(f"  Current simulation data points before finalize: {current_data_size}")
             self._rl_data_collector.finalize_simulation(score)
-            batch_data_size = len(self._rl_data_collector.batch_data)
-            logger.debug(f"  Batch data size after finalize: {batch_data_size}")
         else:
-            logger.warning(f"  Cannot finalize: rl_enabled={self._rl_enabled}, collector={self._rl_data_collector}")
+            pass
     
