@@ -197,7 +197,7 @@ def _run_rl_simulation(cfg: DictConfig, planners: Optional[Union[AbstractPlanner
 
     # ---------------------- torchrun / DDP orchestration ----------------------
     # - 仅 rank0 负责 Ray 仿真与数据收集
-    # - 其它 rank 在仿真阶段等待（timeout=60min）
+    # - 其它 rank 在仿真阶段等待（timeout=120min）
     # - 仿真结束后，所有 rank 进行 DDP 训练（数据分片在 RLTrainer 内完成）
     dist_enabled = False
     rank = 0
@@ -213,7 +213,8 @@ def _run_rl_simulation(cfg: DictConfig, planners: Optional[Union[AbstractPlanner
             import torch.distributed as dist
 
             backend = "nccl" if torch.cuda.is_available() else "gloo"
-            dist.init_process_group(backend=backend, timeout=datetime.timedelta(minutes=60))
+            # Increase watchdog timeout for long-running simulation steps
+            dist.init_process_group(backend=backend, timeout=datetime.timedelta(minutes=120))
             dist_enabled = True
             rank = dist.get_rank()
             world_size = dist.get_world_size()
@@ -227,7 +228,14 @@ def _run_rl_simulation(cfg: DictConfig, planners: Optional[Union[AbstractPlanner
         raise ValueError("planner.flow_planner.rl.output_dir must be set for torchrun shared payload exchange.")
     # 注意：shared payload 可能很大（历史上包含 batch_data），强制写到 /tmp，避免写到当前工作目录或输出目录下导致磁盘压力/溢写。
     tmp_root = Path(os.environ.get("FLOW_PLANNER_TMP_DIR", "/tmp"))
-    exp_uid = _safe_uid(str(cfg.experiment_uid)) if hasattr(cfg, "experiment_uid") else "rl"
+    # Use env var to guarantee all ranks agree on the same uid (avoid Hydra/rank divergence)
+    if "FLOW_PLANNER_EXP_UID" in os.environ:
+        exp_uid_src = os.environ["FLOW_PLANNER_EXP_UID"]
+    elif hasattr(cfg, "experiment_uid"):
+        exp_uid_src = str(cfg.experiment_uid)
+    else:
+        exp_uid_src = "rl"
+    exp_uid = _safe_uid(exp_uid_src)
     shared_payload_path = tmp_root / "flow_planner_rl" / exp_uid / "rl_shared_payload.pt"
     shared_payload_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -288,6 +296,18 @@ def _run_rl_simulation(cfg: DictConfig, planners: Optional[Union[AbstractPlanner
         step_count = 0
         while True:
             dist.barrier()
+            # Be robust to filesystem latency: wait briefly for payload to appear.
+            if not shared_payload_path.exists():
+                t0 = time.perf_counter()
+                # 60s is enough for local /tmp; if this triggers, it's usually a rank uid mismatch or rank0 crash.
+                while (not shared_payload_path.exists()) and (time.perf_counter() - t0 < 60.0):
+                    time.sleep(0.1)
+                if not shared_payload_path.exists():
+                    raise FileNotFoundError(
+                        f"Shared payload not found after barrier: {shared_payload_path}. "
+                        f"exp_uid_src='{exp_uid_src}', exp_uid='{exp_uid}'. "
+                        f"Please ensure all ranks share the same experiment_uid / FLOW_PLANNER_EXP_UID."
+                    )
             payload = torch.load(shared_payload_path, map_location="cpu")
             if not isinstance(payload, dict) or "train_ok" not in payload:
                 raise TypeError(f"Invalid shared payload: {type(payload)}")

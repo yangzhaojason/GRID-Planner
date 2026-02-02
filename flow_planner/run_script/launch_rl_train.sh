@@ -35,7 +35,7 @@ CKPT_FILE=/home/qianzezhong/Flow-Planner_old/results/outputs/FlowPlannerTraining
 
 # RL Training Configuration
 RL_OUTPUT_DIR=/home/qianzezhong/Flow-Planner-RL/results/rl_training # RL training output directory
-RL_BATCH_SIZE=64 # batch size for simulation
+RL_BATCH_SIZE=32 # batch size for simulation
 RL_MICRO_BATCH_SIZE=512 # micro batch size for training
 # Learnable noise_std range (deprecated: RL_NOISE_STD)
 RL_NOISE_STD_MIN=0.08
@@ -44,7 +44,7 @@ RL_MAX_INFLIGHT_RUNNERS=64 # chunk size for Ray execution (reduce spill)
 RL_KEEP_ROLLOUT_FILES=false # keep per-runner rollout files under RL_OUTPUT_DIR/rl_rollouts
 RL_CLIP_RATIO=0.1 # PPO clip ratio
 RL_SAVE_INTERVAL=10 # save checkpoint every N steps
-RL_LEARNING_RATE=1e-6 # learning rate for optimizer
+RL_LEARNING_RATE=5e-7 # learning rate for optimizer
 RL_JOINT_LOGPROB=true # joint logprob for PPO ratio
 # Gradient accumulation steps (per optimizer.step), default 4
 RL_GRADIENT_ACCUMULATE_STEP=16
@@ -58,6 +58,11 @@ FILENAME=$(basename "$CKPT_FILE")
 FILENAME_WITHOUT_EXTENSION="${FILENAME%.*}"
 
 PLANNER=flow_planner
+
+# Ensure ALL torchrun ranks share the same experiment uid / tmp paths.
+# IMPORTANT: compute once (avoid per-rank timestamp drift / hydra differences).
+EXP_UID="$PLANNER/rl/$SPLIT/$BRANCH_NAME/${FILENAME_WITHOUT_EXTENSION}_$(date "+%Y-%m-%d-%H-%M-%S")"
+export FLOW_PLANNER_EXP_UID="$EXP_UID"
 
 torchrun --standalone --nproc_per_node=8 $NUPLAN_DEVKIT_ROOT/nuplan/planning/script/run_simulation.py \
     +simulation=$CHALLENGE \
@@ -79,10 +84,10 @@ torchrun --standalone --nproc_per_node=8 $NUPLAN_DEVKIT_ROOT/nuplan/planning/scr
     planner.flow_planner.rl.learning_rate=$RL_LEARNING_RATE \
     +planner.flow_planner.rl.gradient_accumulate_step=$RL_GRADIENT_ACCUMULATE_STEP \
     planner.flow_planner.rl.joint_logprob=$RL_JOINT_LOGPROB \
-    +planner.flow_planner.rl.entropy_coef=1e-4 \
+    +planner.flow_planner.rl.entropy_coef=5e-4 \
     scenario_builder=$SCENARIO_BUILDER \
     scenario_filter=$SPLIT \
-    experiment_uid=$PLANNER/rl/$SPLIT/$BRANCH_NAME/${FILENAME_WITHOUT_EXTENSION}_$(date "+%Y-%m-%d-%H-%M-%S") \
+    experiment_uid=$EXP_UID \
     verbose=true \
     worker=ray_distributed \
     worker.threads_per_node=64 \
