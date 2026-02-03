@@ -21,13 +21,13 @@ export SPLIT="val14" # e.g., "val14"
 # Options: 
 #   - "closed_loop_nonreactive_agents"
 #   - "closed_loop_reactive_agents"
-export CHALLENGE="closed_loop_nonreactive_agents" # e.g., "closed_loop_nonreactive_agents"
+export CHALLENGE="closed_loop_reactive_agents" # e.g., "closed_loop_nonreactive_agents"
 ###################################
 
 
 BRANCH_NAME=flow_planner_release
-CONFIG_FILE=/home/qianzezhong/Flow-Planner/results/outputs/FlowPlannerTraining/flow_planner_standard/2025-11-30_02-26-51/.hydra/config.yaml # path of .hydra/config in ckpt folder
-CKPT_FILE=/home/qianzezhong/Flow-Planner-RL/results/rl_training/checkpoint_step_20.pth
+CONFIG_FILE=/home/qianzezhong/2026-01-19_14-14-53/.hydra/config.yaml
+CKPT_FILE=/home/qianzezhong/2026-01-19_14-14-53/latest.pth
 
 if [ "$SPLIT" == "val14" ]; then
     SCENARIO_BUILDER="nuplan"

@@ -58,8 +58,20 @@ class VelocityModel(nn.Module):
         pred = self.model_fn(x, t, **model_extras)
         if self.correct_xt_fn is not None:
             pred = self.correct_xt_fn(pred)
-        u = self.pred_transform_func(pred, x, t)
+        # 注意：flow_matching 的某些 path transform 对 t 的广播/维度比较敏感，
+        # 这里逐样本计算，确保每次传入的是标量 t_i，避免出现维度错位导致的 2 vs 4 等 shape mismatch。
+        us = []
+        for i in range(pred.shape[0]):
+            u_i = self.pred_transform_func(pred[i], x[i], t[i])
+            if u_i.shape != pred[i].shape:
+                raise RuntimeError(
+                    f"pred_transform_func returned shape {tuple(u_i.shape)} but expected {tuple(pred[i].shape)}; "
+                    f"i={i}, pred[i].shape={tuple(pred[i].shape)}, x[i].shape={tuple(x[i].shape)}, t[i].shape={tuple(t[i].shape)}"
+                )
+            us.append(u_i)
+        u = torch.stack(us, dim=0)
         if self.use_cfg:
-            u_cond, u_uncond = torch.chunk(u, 2) # the unconditioned batch is the first half
+            # cfg_flags 约定：前半是 conditioned，后半是 unconditioned
+            u_cond, u_uncond = torch.chunk(u, 2)
             u = (1 - self.cfg_weight) * u_uncond + self.cfg_weight * u_cond
         return u
