@@ -20,13 +20,19 @@ export NUPLAN_EXP_ROOT=/home/datasets_2/nuplan/nuPlan-v1.1/exp
 #   - "test14-random"
 #   - "test14-hard"
 #   - "val14"
-export SPLIT="val14"
+# Allow overriding from command line, e.g.:
+#   SPLIT=test14-hard bash flow_planner/run_script/launch_sim_nuplan_graph_weighting_ft.sh
+: "${SPLIT:=val14}"
+export SPLIT
 
 # Challenge type
 # Options:
 #   - "closed_loop_nonreactive_agents"
 #   - "closed_loop_reactive_agents"
-export CHALLENGE="closed_loop_reactive_agents"
+# Allow overriding from command line, e.g.:
+#   CHALLENGE=closed_loop_nonreactive_agents bash flow_planner/run_script/launch_sim_nuplan_graph_weighting_ft.sh
+: "${CHALLENGE:=closed_loop_reactive_agents}"
+export CHALLENGE
 
 ###################################
 

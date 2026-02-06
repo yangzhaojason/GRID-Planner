@@ -30,18 +30,20 @@ export RAY_INCLUDE_DASHBOARD=false
 export RAY_ENABLE_METRICS_AGENT=false
 export RAY_METRICS_EXPORT_PORT=0
 
-# Dataset split to use
-# Options: 
-#   - "test14-random"
+# Dataset split to use (can be overridden by env var SPLIT)
+# Options:
+#   - "test14-random"  (paper table "Test14")
 #   - "test14-hard"
 #   - "val14"
-export SPLIT="val14" # e.g., "val14"
+: "${SPLIT:=val14}"
+export SPLIT
 
 # Challenge type
-# Options: 
+# Options:
 #   - "closed_loop_nonreactive_agents"
 #   - "closed_loop_reactive_agents"
-export CHALLENGE="closed_loop_reactive_agents" # e.g., "closed_loop_nonreactive_agents"
+: "${CHALLENGE:=closed_loop_reactive_agents}"
+export CHALLENGE
 ###################################
 
 
