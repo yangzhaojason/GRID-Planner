@@ -112,6 +112,8 @@ def trainer(cfg: DictConfig):
     with tqdm(total=cfg.train.epoch, initial=init_epoch, disable=(global_rank != 0)) as epoch_bar:
         for epoch in range(init_epoch, cfg.train.epoch):
             trainsampler.set_epoch(epoch)
+            if hasattr(core, "set_epoch"):
+                core.set_epoch(epoch)
                         
             model.train()
             
@@ -134,7 +136,28 @@ def trainer(cfg: DictConfig):
 
                     loss_list.append(loss)
 
-                    tqdm_dict = {'loss' : f"{loss['total_loss'].item():.3f}"}
+                    # richer tqdm display (keep short keys to avoid clutter)
+                    tqdm_dict = {'tot': f"{loss['total_loss'].item():.3f}"}
+                    if 'ego_planning_loss' in loss:
+                        tqdm_dict['plan'] = f"{loss['ego_planning_loss'].item():.3f}"
+                    if 'consistency_loss' in loss:
+                        tqdm_dict['cons'] = f"{loss['consistency_loss'].item():.6f}"
+                    if 'gaiw_mean' in loss:
+                        tqdm_dict['w'] = f"{loss['gaiw_mean'].item():.2f}"
+                    if 'rrs_penalty_mean' in loss:
+                        tqdm_dict['rrsP'] = f"{loss['rrs_penalty_mean'].item():.3f}"
+                    if 'rrs_safety_pen' in loss:
+                        tqdm_dict['safe'] = f"{loss['rrs_safety_pen'].item():.2f}"
+                    if 'rrs_rule_pen' in loss:
+                        tqdm_dict['rule'] = f"{loss['rrs_rule_pen'].item():.2f}"
+                    if 'rrs_comfort_pen' in loss:
+                        tqdm_dict['comf'] = f"{loss['rrs_comfort_pen'].item():.2f}"
+                    if 'rrs_progress' in loss:
+                        tqdm_dict['prog'] = f"{loss['rrs_progress'].item():.2f}"
+                    if 'rrs_mean_speed' in loss:
+                        tqdm_dict['spd'] = f"{loss['rrs_mean_speed'].item():.2f}"
+                    if 'rrs_nu' in loss:
+                        tqdm_dict['nu'] = f"{loss['rrs_nu'].item():.3g}"
                         
                     batch_bar.set_postfix(tqdm_dict)
                     batch_bar.update(1)

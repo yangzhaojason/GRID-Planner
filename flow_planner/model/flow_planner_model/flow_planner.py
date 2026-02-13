@@ -161,6 +161,24 @@ class FlowPlanner(DiffusionADPlanner):
         # vanilla mean loss kept for compatibility (may be overridden by core)
         loss_dict['ego_planning_loss'] = loss.mean()
 
+        # Assemble predicted tokens to full-horizon trajectory (B, 1, future_len, state_dim)
+        # and denormalize to metric space for reward/cost computations in core.
+        try:
+            pred_full = assemble_actions(
+                prediction,
+                self.planner_params['future_len'],
+                self.planner_params['action_len'],
+                self.planner_params['action_overlap'],
+                self.planner_params['state_dim'],
+                self.assemble_method,
+            )  # (B, 1, T, D)
+            pred_full = self.data_processor.state_postprocess(pred_full)  # inverse state normalization
+            # drop the plan dimension for convenience: (B, T, D)
+            loss_dict["pred_future_denorm"] = pred_full[:, 0]
+        except Exception:
+            # Keep training robust if anything unexpected happens
+            pass
+
         if self.planner_params['action_overlap'] > 0:
             consistency_loss = [torch.mean(torch.sum(self.basic_loss(prediction[:, i:i+1, -self.planner_params['action_overlap']:, :], prediction[:, i+1:i+2, :self.planner_params['action_overlap'], :]), dim=-1)) for i in range(0, prediction.shape[1]-2)]
             loss_dict['consistency_loss'] = sum(consistency_loss) / len(consistency_loss)

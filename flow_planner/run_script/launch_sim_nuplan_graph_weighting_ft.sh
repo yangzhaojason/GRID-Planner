@@ -51,7 +51,9 @@ export RAY_ENABLE_METRICS_AGENT=false
 export RAY_METRICS_EXPORT_PORT=0
 
 # 实验输出根目录（和训练脚本里的 SAVE_DIR 一致）
-EXP_SAVE_ROOT=/home/results/yangzhao/grid_planner/outputs/FlowPlannerTraining/flow_planner_standard
+# Allow overriding from command line, e.g.:
+#   EXP_SAVE_ROOT=/home/results/.../ablation_rrs/runA bash ...
+: "${EXP_SAVE_ROOT:=/home/results/yangzhao/grid_planner/outputs/FlowPlannerTraining/flow_planner_standard}"
 
 # 方式一：手动指定时间戳（可选）
 #   export RUN_TIMESTAMP=2025-12-09_16-20-31
@@ -71,7 +73,18 @@ fi
 
 BRANCH_NAME=flow_planner_graph_weighting_ft
 CONFIG_FILE=${RUN_DIR}/.hydra/config.yaml        # path of .hydra/config in ckpt folder
-CKPT_FILE=${RUN_DIR}/latest.pth                  # path to the .pth of checkpoint
+
+# Checkpoint selection:
+# - default: latest.pth under RUN_DIR
+# - override by setting CKPT_NAME (basename under RUN_DIR), e.g. CKPT_NAME=model_epoch_1_trainloss_0.0030.pth
+# - or override by setting CKPT_PATH (absolute path to a .pth)
+if [ -n "${CKPT_PATH}" ]; then
+  CKPT_FILE="${CKPT_PATH}"
+elif [ -n "${CKPT_NAME}" ]; then
+  CKPT_FILE="${RUN_DIR}/${CKPT_NAME}"
+else
+  CKPT_FILE="${RUN_DIR}/latest.pth"
+fi
 
 if [ "$SPLIT" == "val14" ]; then
     SCENARIO_BUILDER="nuplan"

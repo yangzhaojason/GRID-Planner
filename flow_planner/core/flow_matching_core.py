@@ -5,6 +5,7 @@ from functools import partial
 from flow_planner.core import Core
 from flow_planner.model.model_utils.time_sampler import TimeSampler
 from flow_planner.data.dataset.nuplan import NuPlanDataSample
+from flow_planner.reward.rrs import RelationalRewardSurrogate
 
 class FlowMatchingCore(Core):
     
@@ -13,6 +14,7 @@ class FlowMatchingCore(Core):
             input_aug=None,
             device: str = 'cuda',
             graph_weighting=None,
+            rrs=None,
             **loss_weights,
     ):
         
@@ -22,6 +24,13 @@ class FlowMatchingCore(Core):
         self.input_aug = input_aug
         self.loss_weights = loss_weights
         self.graph_weighting_cfg = graph_weighting or {}
+        self.rrs_cfg = rrs or {}
+        self.rrs_module = RelationalRewardSurrogate(self.rrs_cfg) if self.rrs_cfg.get("enabled", False) else None
+        self._epoch = 0
+    
+    def set_epoch(self, epoch: int):
+        """Optional hook for trainer to set current epoch (used for warm-up schedules)."""
+        self._epoch = int(epoch)
     
     def _compute_graph_aware_weight(self, data: NuPlanDataSample) -> torch.Tensor:
         """
@@ -198,11 +207,76 @@ class FlowMatchingCore(Core):
             # keep an unweighted copy for potential logging
             loss_dict['ego_planning_loss_unweighted'] = loss_dict.get('ego_planning_loss', per_sample.mean())
             loss_dict['ego_planning_loss'] = (gaiw * per_sample).mean()
+
+        # Optional: Relational Reward Surrogate (implemented as COST) + unified objective term
+        rrs_loss = None
+        nu_base = float(self.rrs_cfg.get("nu", self.rrs_cfg.get("weight", 0.0)))
+        warmup_epochs = int(self.rrs_cfg.get("nu_warmup_epochs", 0))
+        if warmup_epochs > 0:
+            # ramp from 0 to nu_base over warmup_epochs
+            ramp = min(1.0, max(0.0, (self._epoch + 1) / float(warmup_epochs)))
+            nu = nu_base * ramp
+        else:
+            nu = nu_base
+        if self.rrs_module is not None and nu != 0.0:
+            if "pred_future_denorm" in loss_dict:
+                # pred_future_denorm: (B, T, 4) = (x, y, cos, sin) in meters
+                pred_future = loss_dict["pred_future_denorm"]
+                rrs_penalty_per_sample, comps = self.rrs_module(pred_future, data)
+                # combine with (optional) graph-aware weights
+                if self.rrs_cfg.get("use_gaiw", True) and gaiw is not None:
+                    rrs_penalty_per_sample = rrs_penalty_per_sample * gaiw
+                # unified objective term (minimize penalty == maximize reward)
+                rrs_loss = rrs_penalty_per_sample.mean() * nu
+                # expose scalars for logging (trainer will average them)
+                loss_dict["rrs_loss"] = rrs_loss
+                loss_dict["rrs_nu"] = torch.tensor(nu, device=pred_future.device)
+                loss_dict["rrs_penalty_mean"] = rrs_penalty_per_sample.mean()
+                # reward is defined as -penalty for paper-style reporting
+                loss_dict["rrs_reward_mean"] = -rrs_penalty_per_sample.mean()
+                for k, v in comps.items():
+                    if isinstance(v, torch.Tensor) and v.dim() == 1 and v.shape[0] == rrs_penalty_per_sample.shape[0]:
+                        loss_dict[k] = v.mean()
         
         total_loss = sum([loss_dict[k] * self.loss_weights[k] for k in self.loss_weights.keys()])
-        total_loss_dict = {'total_loss': total_loss}
-
-        return total_loss_dict
+        if rrs_loss is not None:
+            total_loss = total_loss + rrs_loss
+        
+        # Return rich logging dict (total_loss keeps graph for backward; others are detached scalars)
+        out: dict = {"total_loss": total_loss}
+        
+        def _add(name: str):
+            if name in loss_dict and isinstance(loss_dict[name], torch.Tensor):
+                # detach to avoid holding graphs across iterations
+                out[name] = loss_dict[name].detach()
+        
+        # core training losses
+        _add("ego_planning_loss")
+        _add("ego_planning_loss_unweighted")
+        _add("consistency_loss")
+        
+        # graph-aware weighting stats
+        if gaiw is not None:
+            out["gaiw_mean"] = gaiw.mean().detach()
+            out["gaiw_min"] = gaiw.amin().detach()
+            out["gaiw_max"] = gaiw.amax().detach()
+        
+        # RRS stats (if enabled)
+        _add("rrs_loss")
+        _add("rrs_penalty_mean")
+        _add("rrs_reward_mean")
+        _add("rrs_penalty")
+        _add("rrs_reward")
+        _add("rrs_safety_pen")
+        _add("rrs_rule_pen")
+        _add("rrs_comfort_pen")
+        _add("rrs_task_pen")
+        _add("rrs_progress_pen")
+        _add("rrs_low_speed_pen")
+        _add("rrs_progress")
+        _add("rrs_mean_speed")
+        
+        return out
         
     def inference(self, model, data, use_cfg=False, cfg_weight=None):
         model = model.to(self.device)

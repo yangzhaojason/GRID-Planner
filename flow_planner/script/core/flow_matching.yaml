@@ -32,3 +32,43 @@ graph_weighting:
   normalize_by_mean: true # normalize w so that mean weight is ~1
   max_weight: 10.0
   min_weight: 0.1
+
+# Relational Reward Surrogate (RRS) as a differentiable COST, optionally combined with w_GAIW.
+# Default disabled to keep backward compatibility.
+rrs:
+  enabled: false
+  nu: 0.0                # added to total loss: total += nu * mean(w * rrs_penalty)
+  weight: 0.0            # alias for nu (kept for compatibility)
+  nu_warmup_epochs: 0    # ramp nu from 0->nu over this many epochs (0 disables)
+  use_gaiw: true
+  dt: 0.1
+  # safety
+  safety_neighbor_source: past_cv
+  d_safe: 2.0
+  ttc_safe: 2.0
+  ego_radius: 1.2
+  neighbor_radius_scale: 0.5
+  tau_softmin: 1.0
+  s_barrier: 0.5
+  # rule
+  lane_dev_thr: 1.0
+  red_stop_thr: 2.0
+  spd_ratio_thr: 0.0
+  dir_diff_thr: 0.8
+  progress_target: 5.0
+  min_mean_speed: 0.5
+  # comfort
+  w_acc: 0.1
+  w_jerk: 0.05
+  w_yaw_rate: 0.02
+  # lambdas
+  lam_col: 1.0
+  lam_d: 1.0
+  lam_ttc: 1.0
+  lam_lane: 1.0
+  lam_red: 0.5
+  lam_spd: 0.5
+  lam_dir: 0.0
+  lam_comfort: 1.0
+  lam_progress: 0.5
+  lam_low_speed: 0.2
