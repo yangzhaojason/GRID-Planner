@@ -1,0 +1,27 @@
+_target_: flow_planner.core.flow_matching_core.FlowMatchingCore
+
+device: ${device}
+
+input_aug:
+  _target_: flow_planner.data.augmentation.identity_augmentation.IdentityAugment
+
+ego_planning_loss: 1.0
+consistency_loss: 0.5
+
+graph_weighting:
+  enabled: true
+  alpha1: 0.1
+  alpha2: 1.0
+  cent_radius: 25.0
+  cent_sigma: 12.5
+  collision_radius: 6.0
+  ttc_scale: 3.0
+  lane_radius: 30.0
+  static_radius: 20.0
+  beta_lane: 0.25
+  beta_static: 0.0
+  beta_red: 0.25
+  temperature: 1.0
+  normalize_by_mean: true
+  max_weight: 10.0
+  min_weight: 0.1

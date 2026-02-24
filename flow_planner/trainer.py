@@ -57,7 +57,8 @@ def trainer(cfg: DictConfig):
 
     model = model.to(local_rank)  # Move model to the current global_rank's GPU
     if cfg.ddp.distributed:
-        model = DDP(model, device_ids=[local_rank], output_device=global_rank)
+        model = DDP(model, device_ids=[local_rank], output_device=global_rank,
+                    find_unused_parameters=True)
     
     # construct dataset & dataloader
     logger.info("construct dataset and dataloader")

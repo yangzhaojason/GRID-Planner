@@ -72,7 +72,7 @@ class ModelInputProcessor:
                     gt_future
                 ], dim=2)
 
-            gt_with_current.to(device)
+            gt_with_current = gt_with_current.to(device)
         else:
             gt_with_current = current_states[:, :, None, :].repeat(1, 1, self.future_len + 1, 1)
 
@@ -93,5 +93,25 @@ class ModelInputProcessor:
             current_velocity = torch.cat([ego_current_state[..., 4:6], ego_current_state[..., 9:10]], dim=-1)[:, None, None, :]
             future_acc = self.x_differentiate(future_velocity, current_velocity)
             gt_with_current = torch.cat([current_velocity, future_acc], dim=-2)
+        elif kinematic == 'xy_only':
+            """
+            nuPlan 原始模式
+            在 nuPlan ego-planning 中，模型需要输出 (x, y, heading) 三个维度——因为自动驾驶规控需要知道车头朝向。对应的 kinematic 模式：
+            waypoints（line 79-87）：输出 (x, y, cos_θ, sin_θ) → 4 维，heading 被展开为 cos/sin
+            velocity（line 88-90）：输出 (Δx, Δy, Δθ) → 3 维，差分表示
+            acceleration（line 91-95）：输出 (Δ²x, Δ²y, Δ²θ) → 3 维，二阶差分
+
+            WOMD 需要 xy_only
+            WOMD motion prediction 只需要预测 (x, y) 位置，不需要 heading。原有的三种模式都无法直接用：
+            waypoints 输出 4 维 (x, y, cos, sin)——多了 heading
+            velocity / acceleration 输出 3 维——也多了 heading 的差分
+            
+            所以需要 xy_only 分支做两件事：
+            gt_with_current[..., :2] — 只取前两维 (x, y)，丢掉第三维（在 WOMD 中存的是 validity flag，不是 heading）
+            state_normalizer(gt_with_current[..., 1:, :]) — 对 future 部分用 StateNormalizer 归一化（和 waypoints 模式一样，只是维度从 4 变成 2）
+            配合 config 中 state_dim: 2，整个模型就在 2D (x, y) 空间上做 flow matching，和 waypoints 模式中 4D 的流程完全一致，只是少了 heading 维度。
+            """
+            gt_with_current = gt_with_current[..., :2]
+            gt_with_current[..., 1:, :] = self.state_normalizer(gt_with_current[..., 1:, :])
         
         return model_inputs, gt_with_current

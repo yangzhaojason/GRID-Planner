@@ -11,6 +11,58 @@ from flow_planner.model.model_utils.input_preprocess import ModelInputProcessor
 from flow_planner.model.model_utils.traj_tool import traj_chunking, assemble_actions
 from flow_planner.data.dataset.nuplan import NuPlanDataSample
 
+
+def _fde_nms(trajs: torch.Tensor, K: int) -> tuple:
+    """
+    Greedy FDE-based NMS to select K diverse trajectories from N candidates.
+
+    Args:
+        trajs: (B, N, T, D) — N candidate trajectories
+        K: number of modes to select
+
+    Returns:
+        selected: (B, K, T, D) — selected trajectories
+        confs: (B, K) — uniform confidence (1/K)
+    """
+    B, N, T, D = trajs.shape
+    endpoints = trajs[:, :, -1, :2]  # (B, N, 2)
+
+    selected_indices = []
+    for b in range(B):
+        chosen = []
+        remaining = list(range(N))
+        for _ in range(min(K, N)):
+            if not remaining:
+                break
+            if not chosen:
+                # pick the trajectory closest to the centroid
+                centroid = endpoints[b, remaining].mean(dim=0)
+                dists_to_centroid = torch.norm(
+                    endpoints[b, remaining] - centroid, dim=-1)
+                best_local = dists_to_centroid.argmin().item()
+                chosen.append(remaining.pop(best_local))
+            else:
+                # pick the one farthest from all chosen
+                chosen_eps = endpoints[b, chosen]  # (len_chosen, 2)
+                rem_eps = endpoints[b, remaining]  # (len_rem, 2)
+                # min distance from each remaining to any chosen
+                dists = torch.cdist(rem_eps, chosen_eps)  # (len_rem, len_chosen)
+                min_dists = dists.min(dim=1).values  # (len_rem,)
+                best_local = min_dists.argmax().item()
+                chosen.append(remaining.pop(best_local))
+        # pad if fewer than K
+        while len(chosen) < K:
+            chosen.append(chosen[-1])
+        selected_indices.append(chosen)
+
+    idx = torch.tensor(selected_indices, device=trajs.device)  # (B, K)
+    idx_expanded = idx.unsqueeze(-1).unsqueeze(-1).expand(B, K, T, D)
+    selected = torch.gather(trajs, 1, idx_expanded)
+    confs = torch.full((B, K), 1.0 / K, device=trajs.device)
+
+    return selected, confs
+
+
 class FlowPlanner(DiffusionADPlanner):
 
     def __init__(
@@ -21,7 +73,7 @@ class FlowPlanner(DiffusionADPlanner):
         flow_ode,
         
         model_type: Literal['x_start', 'noise', 'velocity'] = 'x_start',
-        kinematic: Literal["waypoints", "velocity", "acceleration"] = 'waypoints',
+        kinematic: Literal["waypoints", "velocity", "acceleration", "xy_only"] = 'waypoints',
     
         assemble_method='linear',
         
@@ -194,6 +246,92 @@ class FlowPlanner(DiffusionADPlanner):
         
         return sample
     
+    def forward_inference_multimodal(self, data: NuPlanDataSample,
+                                     num_samples: int = 64,
+                                     num_modes: int = 6,
+                                     use_cfg: bool = True,
+                                     cfg_weight=None,
+                                     chunk_size: int = 8):
+        """
+        Multimodal inference for WOMD Motion Prediction.
+        Oversamples N trajectories with different noise seeds (shared encoder),
+        then selects K representative modes via greedy FDE-based NMS.
+
+        Uses chunked batching: processes `chunk_size` noise seeds per ODE call
+        instead of one at a time, giving ~chunk_size× speedup.
+
+        Returns:
+            trajs: (B, K, future_len, state_dim) — K selected trajectories
+            confs: (B, K) — uniform confidence
+        """
+        B = data.ego_current.shape[0]
+        if use_cfg:
+            cfg_flags = torch.cat([
+                torch.ones((B,), device=self.device),
+                torch.zeros((B,), device=self.device)
+            ], dim=0).to(torch.int32)
+        else:
+            cfg_flags = torch.ones((B,), device=self.device).to(torch.int32)
+
+        model_inputs, _ = self.prepare_model_input(
+            cfg_flags, data, use_cfg, is_training=False)
+
+        encoder_inputs = self.extract_encoder_inputs(model_inputs)
+        encoder_outputs = self.encoder(**encoder_inputs)
+        decoder_model_extra = self.extract_decoder_inputs(encoder_outputs, model_inputs)
+
+        state_dim = self.planner_params['state_dim']
+        action_len = self.planner_params['action_len']
+        future_len = self.planner_params['future_len']
+        action_overlap = self.planner_params['action_overlap']
+
+        all_samples = []
+        for chunk_start in range(0, num_samples, chunk_size):
+            C = min(chunk_size, num_samples - chunk_start)
+
+            # Expand encoder/decoder context: (2B, ...) → (2B*C, ...)
+            expanded_extra = {}
+            for k, v in decoder_model_extra.items():
+                if isinstance(v, torch.Tensor):
+                    expanded_extra[k] = v.repeat_interleave(C, dim=0)
+                elif isinstance(v, (tuple, list)):
+                    expanded_extra[k] = type(v)(
+                        t.repeat_interleave(C, dim=0) if isinstance(t, torch.Tensor) else t
+                        for t in v
+                    )
+                else:
+                    expanded_extra[k] = v
+
+            # Batch C noise seeds: (B*C, action_num, action_len, state_dim)
+            x_init = torch.randn(
+                (B * C, self.action_num, action_len, state_dim),
+                device=self.device)
+
+            sample = self.flow_ode.generate(
+                x_init, self.decoder, self._model_type,
+                use_cfg=use_cfg, cfg_weight=cfg_weight,
+                **expanded_extra)
+            # sample: (B*C, action_num, action_len, state_dim)
+
+            sample = assemble_actions(
+                sample, future_len, action_len,
+                action_overlap, state_dim, self.assemble_method)
+            # sample: (B*C, 1, future_len, state_dim)
+
+            sample = self.data_processor.state_postprocess(sample)
+
+            # Reshape: (B*C, 1, T, D) → (B, C, T, D)
+            sample = sample.squeeze(1).view(B, C, future_len, state_dim)
+            all_samples.append(sample)
+
+        # (B, N, future_len, state_dim)
+        all_trajs = torch.cat(all_samples, dim=1)
+
+        # Greedy FDE-based NMS
+        trajs, confs = _fde_nms(all_trajs, num_modes)
+
+        return trajs, confs
+
     @property
     def model_type(self,):
         return self._model_type
