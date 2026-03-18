@@ -2,7 +2,7 @@ import io
 import torch
 import os
 
-def save_model(model, optimizer, scheduler, save_path, epoch, train_loss, wandb_id, ema, save_every_epoch=200):
+def save_model(model, optimizer, scheduler, save_path, epoch, train_loss, wandb_id, ema, save_every_epoch=200, core=None):
     """
     save the model to path
     """
@@ -15,6 +15,11 @@ def save_model(model, optimizer, scheduler, save_path, epoch, train_loss, wandb_
         'loss': train_loss,
         'wandb_id': wandb_id
     }
+    # Auxiliary modules (e.g., value_net) are stored separately so planner inference checkpoints remain compatible.
+    if core is not None and hasattr(core, "get_aux_state_dict"):
+        aux = core.get_aux_state_dict()
+        if aux:
+            save_ckpt["aux_state_dict"] = aux
     
     torch.save(save_ckpt, f"{save_path}/latest.pth")
 
@@ -31,12 +36,21 @@ def load_model(path: str):
     return ckpt
 
 
-def resume_model(path: str, model, optimizer, scheduler, ema, device):
+def resume_model(path: str, model, optimizer, scheduler, ema, device, core=None):
     """
-    load ckpt from path
+    Resume from a checkpoint.
+
+    `path` can be either:
+      - a run directory containing `latest.pth`, or
+      - a direct path to a `.pth` checkpoint file (e.g. `model_epoch_9_*.pth`).
     """
-    path = os.path.join(path, 'latest.pth')
-    ckpt = torch.load(path, weights_only=True)
+    ckpt_path = path
+    if os.path.isdir(ckpt_path):
+        ckpt_path = os.path.join(ckpt_path, "latest.pth")
+    if not os.path.isfile(ckpt_path):
+        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+
+    ckpt = torch.load(ckpt_path, weights_only=True)
 
     # load model               
     try:
@@ -83,5 +97,13 @@ def resume_model(path: str, model, optimizer, scheduler, ema, device):
         print("ema load done")
     except:
         print('no ema shadow found')
+
+    # load aux state (best-effort)
+    if core is not None and "aux_state_dict" in ckpt and hasattr(core, "load_aux_state_dict"):
+        try:
+            core.load_aux_state_dict(ckpt["aux_state_dict"])
+            print("aux state load done")
+        except Exception:
+            print("aux state load failed (ignored)")
 
     return model, optimizer, scheduler, init_epoch, wandb_id, ema

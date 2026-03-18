@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+: "${CUDA_VISIBLE_DEVICES:=0,1,2,3,4,5,6,7}"
+export CUDA_VISIBLE_DEVICES
+: "${NPROC_PER_NODE:=8}"
+export NPROC_PER_NODE
 export WANDB_API_KEY=null
 export HYDRA_FULL_ERROR=1
 
@@ -22,7 +25,8 @@ export TRAINING_JSON=/home/code/grid_planner/flow_planner_training.json
 # Base checkpoint for fine-tuning
 # NOTE: adjust this path to the .pth you want to fine-tune from.
 # export PRETRAINED_CKPT=/home/results/flow_planner/base_checkpoint/latest.pth
-export PRETRAINED_CKPT=/home/results/yangzhao/grid_planner/outputs/FlowPlannerTraining/flow_planner_standard/2026-01-19_14-14-53/latest.pth
+: "${PRETRAINED_CKPT:=/home/results/yangzhao/grid_planner/outputs/FlowPlannerTraining/flow_planner_standard/2026-01-19_14-14-53/latest.pth}"
+export PRETRAINED_CKPT
 export TORCH_LOGS="dynamic,recompiles"
 
 ###################################
@@ -47,7 +51,7 @@ echo "Training outputs will be saved to: ${TARGET_SAVE_DIR}"
 #   L = L_flow_matching + nu * E[ w_GAIW(tau) * RRS_penalty(tau_hat) ]
 # where RRS_reward = -RRS_penalty (logged as rrs_reward_mean)
 
-python -m torch.distributed.run --nnodes 1 --nproc-per-node 8 --standalone -m flow_planner.trainer \
+python -m torch.distributed.run --nnodes 1 --nproc-per-node "${NPROC_PER_NODE}" --standalone -m flow_planner.trainer \
   --config-name flow_planner_standard \
   pretrained_checkpoint=${PRETRAINED_CKPT} \
   save_dir=${TARGET_SAVE_DIR} \

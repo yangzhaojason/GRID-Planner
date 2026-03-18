@@ -65,9 +65,20 @@ def trainer(cfg: DictConfig):
     trainsampler = DistributedSampler(trainset, num_replicas=world_size, rank=global_rank, shuffle=True)
     trainloader = DataLoader(trainset, sampler=trainsampler, batch_size=cfg.train.batch_size // world_size, num_workers=cfg.num_workers, pin_memory=cfg.pin_mem, drop_last=True, collate_fn=collect_batch)
     
-    # build optimizer
+    # build core first (may contain auxiliary trainable modules like value baseline)
+    logger.info("build core")
+    core = instantiate(cfg.core)
+
+    # wrap core.value_net with DDP (if present) so critic is synchronized across ranks
+    if cfg.ddp.distributed and hasattr(core, "value_net") and core.value_net is not None:
+        core.value_net = DDP(core.value_net.to(local_rank), device_ids=[local_rank], output_device=global_rank)
+
+    # build optimizer (model params + core aux params)
     logger.info("build optimizer")
-    optimizer = instantiate(cfg.optimizer, params=ddp.get_model(model).get_optimizer_params(), lr=cfg.optimizer.lr)
+    params = list(ddp.get_model(model).get_optimizer_params())
+    if hasattr(core, "get_optimizer_params"):
+        params.extend(core.get_optimizer_params())
+    optimizer = instantiate(cfg.optimizer, params=params, lr=cfg.optimizer.lr)
 
     # build scheduler
     logger.info("build scheduler")
@@ -76,10 +87,6 @@ def trainer(cfg: DictConfig):
     # build ema
     logger.info("build ema")
     ema = instantiate(cfg.ema, model=model)
-    # build core
-    logger.info("build core")
-    # TODO: modify augmentation for compatibility with AirFormerDataSample
-    core = instantiate(cfg.core)
     
     if cfg.resume_path is not None:
         model, optimizer, scheduler, init_epoch, wandb_id, ema = resume_model(
@@ -88,7 +95,8 @@ def trainer(cfg: DictConfig):
             optimizer,
             scheduler,
             ema,
-            cfg.device
+            cfg.device,
+            core=core,
         )
     else:
         wandb_id = None
@@ -128,7 +136,10 @@ def trainer(cfg: DictConfig):
                     optimizer.zero_grad()
                     loss['total_loss'].backward()
 
-                    nn.utils.clip_grad_norm_(ddp.get_model(model).parameters(), 5)
+                    clip_params = list(ddp.get_model(model).parameters())
+                    if hasattr(core, "value_net") and core.value_net is not None:
+                        clip_params.extend(list(ddp.get_model(core.value_net).parameters()))
+                    nn.utils.clip_grad_norm_(clip_params, 5)
                     
                     optimizer.step()
 
@@ -158,6 +169,26 @@ def trainer(cfg: DictConfig):
                         tqdm_dict['spd'] = f"{loss['rrs_mean_speed'].item():.2f}"
                     if 'rrs_nu' in loss:
                         tqdm_dict['nu'] = f"{loss['rrs_nu'].item():.3g}"
+                    if 'rl_actor_loss' in loss:
+                        tqdm_dict['rlA'] = f"{loss['rl_actor_loss'].item():.3f}"
+                    if 'rl_v_loss' in loss:
+                        tqdm_dict['rlV'] = f"{loss['rl_v_loss'].item():.3f}"
+                    if 'rl_adv_mean' in loss:
+                        tqdm_dict['adv'] = f"{loss['rl_adv_mean'].item():.3f}"
+                    if 'rl_pos_adv_frac' in loss:
+                        tqdm_dict['pos'] = f"{loss['rl_pos_adv_frac'].item():.2f}"
+                    if 'rl_improvement_mean' in loss:
+                        tqdm_dict['imp'] = f"{loss['rl_improvement_mean'].item():.3f}"
+                    if 'rl_actor_active_frac' in loss:
+                        tqdm_dict['act'] = f"{loss['rl_actor_active_frac'].item():.2f}"
+                    if 'rl_auto_scale' in loss:
+                        tqdm_dict['shr'] = f"{loss['rl_auto_scale'].item():.2f}"
+                    if 'rl_group_best_reward_mean' in loss:
+                        tqdm_dict['rbest'] = f"{loss['rl_group_best_reward_mean'].item():.3f}"
+                    if 'rl_e_diff_mean' in loss:
+                        tqdm_dict['ediff'] = f"{loss['rl_e_diff_mean'].item():.3f}"
+                    if 'rl_weight_eff' in loss:
+                        tqdm_dict['rw'] = f"{loss['rl_weight_eff'].item():.2f}"
                         
                     batch_bar.set_postfix(tqdm_dict)
                     batch_bar.update(1)
@@ -171,7 +202,36 @@ def trainer(cfg: DictConfig):
             if cfg.ddp.distributed:
                 epoch_loss = reduce_and_average_losses(epoch_loss, torch.device(cfg.device))
 
-            logger.info(f"epoch loss : {epoch_loss['total_loss']:.3e} | epoch_lr : {epoch_lr['lr/group_0']:.3e}")
+            def _fmt_epoch(name: str) -> str:
+                v = epoch_loss.get(name, None)
+                if v is None:
+                    return ""
+                try:
+                    return f"{name}={float(v):.4g}"
+                except Exception:
+                    return ""
+
+            epoch_keys = [
+                "total_loss",
+                "ego_planning_loss",
+                "rrs_penalty_mean",
+                "rrs_reward_mean",
+                "rl_actor_loss",
+                "rl_v_loss",
+                "rl_adv_mean",
+                "rl_pos_adv_frac",
+                "rl_improvement_mean",
+                "rl_actor_active_frac",
+                "rl_auto_scale",
+                "rl_reward_mean",
+                "rl_ref_reward_mean",
+                "rl_weight_eff",
+                "rl_critic_weight_eff",
+                "rl_group_best_reward_mean",
+                "rl_e_diff_mean",
+            ]
+            rich = " ".join([s for s in (_fmt_epoch(k) for k in epoch_keys) if s])
+            logger.info(f"epoch loss : total={epoch_loss['total_loss']:.3e} | epoch_lr : {epoch_lr['lr/group_0']:.3e} | {rich}")
 
             if global_rank == 0:
                 for recorder in recorder_dict.values():
@@ -184,7 +244,7 @@ def trainer(cfg: DictConfig):
                     wandb_id = recorder_dict['wandb'].id
                 else:
                     wandb_id = None
-                save_model(model, optimizer, scheduler, cfg.save_dir, epoch, epoch_loss['total_loss'], wandb_id, ema.ema, save_every_epoch=cfg.save_every_since)
+                save_model(model, optimizer, scheduler, cfg.save_dir, epoch, epoch_loss['total_loss'], wandb_id, ema.ema, save_every_epoch=cfg.save_every_since, core=core)
                 print(f"Model saved in {cfg.save_dir}\n")
             
             epoch_bar.update(1)

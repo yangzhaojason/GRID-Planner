@@ -72,3 +72,47 @@ rrs:
   lam_comfort: 1.0
   lam_progress: 0.5
   lam_low_speed: 0.2
+
+# On-policy RL using rollout rewards from RRS.
+# Default algorithm is critic-free GRPO-style; actor_critic remains available as a fallback.
+# Disabled by default to preserve existing training behavior.
+rl:
+  enabled: false
+  algorithm: grpo
+  use_gaiw: true
+  reward_source: rollout
+  rollout_use_cfg: true
+  rollout_cfg_weight: 1.0
+  rollout_seed_base: 3402
+  group_size: 4
+  group_center: true
+  group_normalize: true
+  group_norm_eps: 1.0e-6
+  select_best_only: true
+  improvement_aware: true
+  reference_source: rollout
+  reference_seed_offset: 1000
+  improvement_margin: 0.0
+  improvement_normalize_by_mean: true
+  improvement_max_multiplier: 3.0
+  auto_shrink_on_low_improvement: true
+  auto_shrink_min_improvement: 0.002
+  auto_shrink_min_active_frac: 0.10
+  weight: 1.0
+  critic_weight: 1.0
+  warmup_epochs: 1
+  critic_warmup_epochs: 1
+  normalize_reward: false
+  reward_scale: 1.0
+  reward_clip: 10.0
+  normalize_adv: true
+  adv_clip: 5.0
+  actor_use_negative_adv: false
+  positive_only_adv: true
+  normalize_fm_energy: true
+  fm_energy_min_denom: 1.0e-6
+  critic_loss: huber
+  critic_huber_beta: 1.0
+  hidden_dim: 128
+  depth: 2
+  dropout: 0.0

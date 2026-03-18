@@ -1,0 +1,88 @@
+_target_: flow_planner.core.opds_distill_core.OPSDDistillCore
+
+device: ${device}
+
+input_aug:
+  _target_: flow_planner.data.augmentation.nuplan_augmentation.NuPlanAugment
+  state_aug:
+    _target_: flow_planner.data.augmentation.state_aug.StatePerturbation
+    augment_prob: 0.5
+  map_aug: null
+  device: ${device}
+
+# Keep FM losses in the same structure as FlowMatchingCore
+ego_planning_loss: 1.0
+consistency_loss: 0.5
+
+graph_weighting:
+  enabled: false
+
+rrs:
+  enabled: true
+  nu: 0.0
+  nu_warmup_epochs: 0
+  use_gaiw: true
+  safety_neighbor_source: past_cv
+  lam_col: 0.20
+  lam_d: 0.20
+  lam_ttc: 0.20
+  lam_lane: 0.0
+  lam_red: 0.0
+  lam_spd: 0.0
+  lam_dir: 0.0
+  lam_comfort: 0.0
+  lam_progress: 0.0
+  lam_low_speed: 0.0
+
+opsd:
+  enabled: true
+  teacher_ckpt_path: ${oc.env:TEACHER_CKPT,null}
+  distill_weight: 1.0
+  gate_value: 1.0
+  xy_weight: 1.0
+  heading_weight: 0.2
+  huber_beta: 1.0
+  unified_with_rl: true
+  dynamic_gate_with_adv: true
+  adv_temperature: 1.0
+  adv_clip: 10.0
+  paper_aligned_objective: true
+  keep_consistency_reg: true
+  sample_use_cfg: true
+  sample_cfg_weight: 1.0
+  actor_use_negative_adv: false
+  positive_only_adv: true
+  paper_keep_base_loss: true
+  fm_anchor_weight: 0.2
+  rollout_match_noise: true
+  rollout_seed_base: 3402
+  teacher_selection_mode: single
+  teacher_selection_source: teacher
+  teacher_selection_k: 1
+  improvement_aware_gate: false
+  improvement_margin: 0.0
+  improvement_normalize_by_mean: true
+  improvement_max_multiplier: 3.0
+  rollout_micro_batch_size: 64
+
+rl:
+  enabled: true
+  algorithm: actor_critic
+  use_gaiw: true
+  weight: 1.0
+  critic_weight: 1.0
+  warmup_epochs: 3
+  critic_warmup_epochs: 3
+  normalize_reward: false
+  reward_scale: 1.0
+  reward_clip: 10.0
+  normalize_adv: true
+  adv_clip: 5.0
+  normalize_fm_energy: true
+  fm_energy_min_denom: 1.0e-6
+  critic_loss: huber
+  critic_huber_beta: 1.0
+  hidden_dim: 128
+  depth: 2
+  dropout: 0.0
+
