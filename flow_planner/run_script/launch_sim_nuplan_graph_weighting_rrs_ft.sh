@@ -14,7 +14,8 @@ export PROJECT_ROOT=/home/code/grid_planner                                  # F
 export NUPLAN_DEVKIT_ROOT=/home/code/grid_planner/nuplan-devkit             # nuplan-devkit 绝对路径
 export NUPLAN_DATA_ROOT=/home/datasets_2/nuplan/                             # nuplan 原始数据路径
 export NUPLAN_MAPS_ROOT=/home/datasets_2/nuplan/nuPlan-v1.1/maps
-export NUPLAN_EXP_ROOT=/home/datasets_2/nuplan/nuPlan-v1.1/exp
+: "${NUPLAN_EXP_ROOT:=/home/results/yangzhao/grid_planner}"
+export NUPLAN_EXP_ROOT
 
 # Dataset split to use
 # Options:
@@ -41,7 +42,8 @@ export CHALLENGE
 export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH}"
 
 # Put Ray temp/object store on the large disk to avoid "Local disk is full"
-export RAY_TMPDIR=/home/datasets_2/ray_tmp
+export RAY_TMPDIR="${RAY_TMPDIR:-/home/results/ray}"
+mkdir -p "${NUPLAN_EXP_ROOT}"
 mkdir -p "${RAY_TMPDIR}"
 
 # Ray: disable dashboard/metrics to avoid exporter-agent init retries slowing down startup

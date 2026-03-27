@@ -247,6 +247,223 @@ class FlowMatchingCore(Core):
             scale = torch.minimum(scale, s)
         return scale.detach()
 
+    def _apply_standard_rl_objective(
+        self,
+        model: nn.Module,
+        data_for_policy: NuPlanDataSample,
+        loss_dict: dict,
+        gaiw: Optional[torch.Tensor],
+        total_loss: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Apply the standard FlowMatchingCore RL objective on top of an existing loss.
+        Subclasses reuse this helper when they need RL behavior to match the base core
+        exactly, instead of silently diverging in fallback branches.
+        """
+        if not self.rl_cfg.get("enabled", False):
+            return total_loss
+
+        if "rrs_reward_per_sample" not in loss_dict or "rrs_penalty_per_sample" not in loss_dict:
+            return total_loss
+
+        rl_algorithm = self._rl_algorithm
+        reward_source = str(self.rl_cfg.get("reward_source", "rollout")).lower()
+        if rl_algorithm == "grpo":
+            group_size = max(1, int(self.rl_cfg.get("group_size", 4)))
+            seed_base = int(self.rl_cfg.get("rollout_seed_base", 3402)) + int(self._rollout_counter) * group_size
+            self._rollout_counter += 1
+
+            tau_candidates = []
+            reward_candidates = []
+            penalty_candidates = []
+            for i in range(group_size):
+                tau_i = self._sample_tau_denorm(model, data_for_policy, seed=seed_base + i)
+                reward_i, penalty_i = self._proxy_reward_from_tau(tau_i, data_for_policy, gaiw)
+                tau_candidates.append(tau_i)
+                reward_candidates.append(reward_i)
+                penalty_candidates.append(penalty_i)
+
+            tau_stack = torch.stack(tau_candidates, dim=0)         # (K, B, T, 4)
+            reward_stack = torch.stack(reward_candidates, dim=0)   # (K, B)
+            penalty_stack = torch.stack(penalty_candidates, dim=0) # (K, B)
+            A = self._compute_group_relative_advantage(reward_stack)
+
+            batch_idx = torch.arange(reward_stack.shape[1], device=reward_stack.device)
+            best_idx = reward_stack.argmax(dim=0)
+
+            select_best_only = bool(self.rl_cfg.get("select_best_only", True))
+            if select_best_only:
+                tau_actor = tau_stack[best_idx, batch_idx]
+                reward_actor = reward_stack[best_idx, batch_idx]
+                e_diff_actor = self._diffusion_loss_per_sample_on_tau(model, data_for_policy, tau_actor.detach())
+                actor_A = self._transform_actor_advantage(
+                    A[best_idx, batch_idx],
+                    positive_only=bool(self.rl_cfg.get("positive_only_adv", False)),
+                    use_negative=bool(self.rl_cfg.get("actor_use_negative_adv", False)),
+                )
+            else:
+                e_diff_candidates = []
+                for i in range(group_size):
+                    e_diff_i = self._diffusion_loss_per_sample_on_tau(model, data_for_policy, tau_stack[i].detach())
+                    e_diff_candidates.append(e_diff_i)
+                e_diff_stack = torch.stack(e_diff_candidates, dim=0)   # (K, B)
+                reward_actor = reward_stack
+                e_diff_actor = e_diff_stack
+                actor_A = self._transform_actor_advantage(
+                    A,
+                    positive_only=bool(self.rl_cfg.get("positive_only_adv", False)),
+                    use_negative=bool(self.rl_cfg.get("actor_use_negative_adv", False)),
+                )
+
+            improvement = None
+            ref_reward = None
+            actor_active_frac = (actor_A > 0).float().mean()
+            auto_scale = actor_A.new_tensor(1.0)
+            if bool(self.rl_cfg.get("improvement_aware", False)):
+                ref_source = str(self.rl_cfg.get("reference_source", "rollout")).lower()
+                if ref_source == "rollout":
+                    ref_seed = seed_base + group_size + int(self.rl_cfg.get("reference_seed_offset", 1000))
+                    tau_ref = self._sample_tau_denorm(model, data_for_policy, seed=ref_seed)
+                    ref_reward, _ = self._proxy_reward_from_tau(tau_ref, data_for_policy, gaiw)
+                elif "pred_future_denorm" in loss_dict:
+                    ref_reward, _ = self._proxy_reward_from_tau(loss_dict["pred_future_denorm"].detach(), data_for_policy, gaiw)
+
+            if ref_reward is not None:
+                gate, improvement = self._compute_improvement_multiplier(
+                    reward_actor if reward_actor.dim() == 1 else reward_actor.max(dim=0).values,
+                    ref_reward,
+                )
+                if actor_A.dim() == 2:
+                    actor_A = actor_A * gate.unsqueeze(0)
+                else:
+                    actor_A = actor_A * gate
+                actor_active_frac = (gate > 0).float().mean()
+
+            if bool(self.rl_cfg.get("auto_shrink_on_low_improvement", False)):
+                auto_scale = self._compute_auto_shrink_scale(improvement, actor_active_frac)
+                actor_A = actor_A * auto_scale
+
+            if bool(self.rl_cfg.get("normalize_fm_energy", False)):
+                denom = e_diff_actor.detach().mean().abs().clamp(
+                    min=float(self.rl_cfg.get("fm_energy_min_denom", 1e-6))
+                )
+                e_diff_actor = e_diff_actor / denom
+
+            rl_actor_loss = torch.mean(e_diff_actor * actor_A)
+
+            rl_weight = float(self.rl_cfg.get("weight", 1.0))
+            rl_warmup_epochs = int(self.rl_cfg.get("warmup_epochs", 0))
+            if rl_warmup_epochs > 0:
+                rl_weight = rl_weight * min(1.0, max(0.0, (self._epoch + 1) / float(rl_warmup_epochs)))
+            total_loss = total_loss + rl_weight * rl_actor_loss
+
+            loss_dict["rl_rollout_penalty_mean"] = penalty_stack.mean()
+            loss_dict["rl_rollout_reward_mean"] = reward_stack.mean()
+            loss_dict["rl_reward_mean"] = reward_stack.mean()
+            loss_dict["rl_adv_mean"] = A.mean()
+            loss_dict["rl_reward_std"] = reward_stack.std(unbiased=False)
+            loss_dict["rl_adv_std"] = A.std(unbiased=False)
+            loss_dict["rl_pos_adv_frac"] = (A > 0).float().mean()
+            if ref_reward is not None:
+                loss_dict["rl_ref_reward_mean"] = ref_reward.mean()
+            if improvement is not None:
+                loss_dict["rl_improvement_mean"] = improvement.mean()
+            loss_dict["rl_actor_active_frac"] = actor_active_frac
+            loss_dict["rl_auto_scale"] = auto_scale
+            loss_dict["rl_group_best_reward_mean"] = reward_stack.amax(dim=0).mean()
+            loss_dict["rl_group_worst_reward_mean"] = reward_stack.amin(dim=0).mean()
+            loss_dict["rl_group_size"] = torch.tensor(float(group_size), device=reward_stack.device)
+            loss_dict["rl_weight_eff"] = torch.tensor(float(rl_weight), device=reward_stack.device)
+            loss_dict["rl_actor_loss"] = rl_actor_loss
+            loss_dict["rl_e_diff_mean"] = e_diff_actor.mean()
+            return total_loss
+
+        if reward_source == "rollout" and self.rrs_module is not None:
+            tau_rollout = self._sample_tau_denorm(model, data_for_policy)
+            rrs_reward, rrs_penalty = self._proxy_reward_from_tau(tau_rollout, data_for_policy, gaiw)
+            loss_dict["rl_rollout_penalty_mean"] = rrs_penalty.mean()
+            loss_dict["rl_rollout_reward_mean"] = rrs_reward.mean()
+        else:
+            rrs_penalty = loss_dict["rrs_penalty_per_sample"]
+            rrs_reward = loss_dict["rrs_reward_per_sample"]
+            if self.rl_cfg.get("use_gaiw", True) and gaiw is not None and not self.rrs_cfg.get("use_gaiw", True):
+                rrs_penalty = rrs_penalty * gaiw
+                rrs_reward = rrs_reward * gaiw
+            rrs_reward = self._shape_rl_reward(rrs_reward)
+
+        if bool(self.rl_cfg.get("normalize_reward", False)):
+            r_mu = rrs_reward.mean()
+            r_std = rrs_reward.std(unbiased=False).clamp(min=1e-6)
+            rrs_reward_target = (rrs_reward - r_mu) / r_std
+        else:
+            rrs_reward_target = rrs_reward
+
+        z = torch.stack(
+            [
+                loss_dict.get("ego_planning_loss_per_sample", loss_dict["ego_planning_loss"].detach()).detach().view(-1),
+                rrs_penalty.detach().view(-1),
+            ],
+            dim=-1,
+        )
+
+        if self.value_net is None:
+            hidden = int(self.rl_cfg.get("hidden_dim", 128))
+            depth = int(self.rl_cfg.get("depth", 2))
+            dropout = float(self.rl_cfg.get("dropout", 0.0))
+            self.value_net = ValueMLP(in_dim=z.shape[-1], hidden_dim=hidden, depth=depth, dropout=dropout).to(z.device)
+        V = self.value_net(z)
+
+        critic_loss_type = str(self.rl_cfg.get("critic_loss", "mse")).lower()
+        if critic_loss_type == "huber":
+            huber_beta = float(self.rl_cfg.get("critic_huber_beta", 1.0))
+            rl_v_loss = F.smooth_l1_loss(V, rrs_reward_target.detach(), beta=huber_beta, reduction="mean")
+        else:
+            rl_v_loss = torch.mean((V - rrs_reward_target.detach()) ** 2)
+
+        A = (rrs_reward_target - V).detach()
+        if bool(self.rl_cfg.get("normalize_adv", False)):
+            A = (A - A.mean()) / (A.std(unbiased=False).clamp(min=1e-6))
+        adv_clip = float(self.rl_cfg.get("adv_clip", 0.0))
+        if adv_clip > 0:
+            A = torch.clamp(A, min=-adv_clip, max=adv_clip)
+        actor_A = self._transform_actor_advantage(
+            A,
+            positive_only=bool(self.rl_cfg.get("positive_only_adv", False)),
+            use_negative=bool(self.rl_cfg.get("actor_use_negative_adv", False)),
+        )
+
+        fm_energy = loss_dict.get("ego_planning_loss_per_sample", None)
+        if fm_energy is None:
+            fm_energy = loss_dict["ego_planning_loss"].detach().expand_as(A)
+        if fm_energy.dim() != 1:
+            fm_energy = fm_energy.view(fm_energy.shape[0], -1).mean(dim=1)
+        if bool(self.rl_cfg.get("normalize_fm_energy", False)):
+            denom = fm_energy.detach().mean().abs().clamp(min=float(self.rl_cfg.get("fm_energy_min_denom", 1e-6)))
+            fm_energy = fm_energy / denom
+        rl_actor_loss = torch.mean(fm_energy * actor_A)
+
+        rl_weight = float(self.rl_cfg.get("weight", 1.0))
+        rl_warmup_epochs = int(self.rl_cfg.get("warmup_epochs", 0))
+        if rl_warmup_epochs > 0:
+            rl_weight = rl_weight * min(1.0, max(0.0, (self._epoch + 1) / float(rl_warmup_epochs)))
+        critic_weight = float(self.rl_cfg.get("critic_weight", 1.0))
+        critic_warmup_epochs = int(self.rl_cfg.get("critic_warmup_epochs", 0))
+        if critic_warmup_epochs > 0:
+            critic_weight = critic_weight * min(1.0, max(0.0, (self._epoch + 1) / float(critic_warmup_epochs)))
+        total_loss = total_loss + rl_weight * rl_actor_loss + critic_weight * rl_v_loss
+
+        loss_dict["rl_reward_mean"] = rrs_reward.mean()
+        loss_dict["rl_adv_mean"] = A.mean()
+        loss_dict["rl_reward_std"] = rrs_reward.std(unbiased=False)
+        loss_dict["rl_adv_std"] = A.std(unbiased=False)
+        loss_dict["rl_pos_adv_frac"] = (A > 0).float().mean()
+        loss_dict["rl_v_mean"] = V.mean()
+        loss_dict["rl_weight_eff"] = torch.tensor(float(rl_weight), device=rrs_reward.device)
+        loss_dict["rl_critic_weight_eff"] = torch.tensor(float(critic_weight), device=rrs_reward.device)
+        loss_dict["rl_v_loss"] = rl_v_loss
+        loss_dict["rl_actor_loss"] = rl_actor_loss
+        return total_loss
+
     def get_optimizer_params(self):
         """Aux params (e.g., critic/value net) to be added to the main optimizer."""
         if self.value_net is None:
@@ -431,7 +648,8 @@ class FlowMatchingCore(Core):
         if temperature > 0:
             log_w = log_w / temperature
         weights = torch.exp(log_w)
-        weights = torch.clamp(weights, min=min_weight, max=max_weight)
+        if self.graph_weighting_cfg.get("enable_clipping", True):
+            weights = torch.clamp(weights, min=min_weight, max=max_weight)
         
         # Optional normalization to keep mean weight around 1
         if self.graph_weighting_cfg.get("normalize_by_mean", True):
@@ -504,210 +722,13 @@ class FlowMatchingCore(Core):
             total_loss = total_loss + rrs_loss
 
         # Optional: On-policy RL term.
-        # Default path is a critic-free GRPO-style update:
-        #   1) sample K rollout trajectories per scene
-        #   2) compute group-relative advantages from rollout rewards
-        #   3) weight a diffusion/FM surrogate e_diff(τ, G) by stopgrad(A)
-        # Actor-critic remains available as a fallback via core.rl.algorithm=actor_critic.
-        if self.rl_cfg.get("enabled", False):
-            # Require RRS components to compute reward
-            if "rrs_reward_per_sample" in loss_dict and "rrs_penalty_per_sample" in loss_dict:
-                rl_algorithm = self._rl_algorithm
-                reward_source = str(self.rl_cfg.get("reward_source", "rollout")).lower()
-                if rl_algorithm == "grpo":
-                    group_size = max(1, int(self.rl_cfg.get("group_size", 4)))
-                    seed_base = int(self.rl_cfg.get("rollout_seed_base", 3402)) + int(self._rollout_counter) * group_size
-                    self._rollout_counter += 1
-
-                    tau_candidates = []
-                    reward_candidates = []
-                    penalty_candidates = []
-                    for i in range(group_size):
-                        tau_i = self._sample_tau_denorm(model, data_for_policy, seed=seed_base + i)
-                        reward_i, penalty_i = self._proxy_reward_from_tau(tau_i, data_for_policy, gaiw)
-                        tau_candidates.append(tau_i)
-                        reward_candidates.append(reward_i)
-                        penalty_candidates.append(penalty_i)
-
-                    tau_stack = torch.stack(tau_candidates, dim=0)         # (K, B, T, 4)
-                    reward_stack = torch.stack(reward_candidates, dim=0)   # (K, B)
-                    penalty_stack = torch.stack(penalty_candidates, dim=0) # (K, B)
-                    A = self._compute_group_relative_advantage(reward_stack)
-
-                    batch_idx = torch.arange(reward_stack.shape[1], device=reward_stack.device)
-                    best_idx = reward_stack.argmax(dim=0)
-
-                    select_best_only = bool(self.rl_cfg.get("select_best_only", True))
-                    if select_best_only:
-                        tau_actor = tau_stack[best_idx, batch_idx]
-                        reward_actor = reward_stack[best_idx, batch_idx]
-                        e_diff_actor = self._diffusion_loss_per_sample_on_tau(model, data_for_policy, tau_actor.detach())
-                        actor_A = self._transform_actor_advantage(
-                            A[best_idx, batch_idx],
-                            positive_only=bool(self.rl_cfg.get("positive_only_adv", False)),
-                            use_negative=bool(self.rl_cfg.get("actor_use_negative_adv", False)),
-                        )
-                    else:
-                        e_diff_candidates = []
-                        for i in range(group_size):
-                            e_diff_i = self._diffusion_loss_per_sample_on_tau(model, data_for_policy, tau_stack[i].detach())
-                            e_diff_candidates.append(e_diff_i)
-                        e_diff_stack = torch.stack(e_diff_candidates, dim=0)   # (K, B)
-                        reward_actor = reward_stack
-                        e_diff_actor = e_diff_stack
-                        actor_A = self._transform_actor_advantage(
-                            A,
-                            positive_only=bool(self.rl_cfg.get("positive_only_adv", False)),
-                            use_negative=bool(self.rl_cfg.get("actor_use_negative_adv", False)),
-                        )
-
-                    improvement = None
-                    gate = None
-                    ref_reward = None
-                    actor_active_frac = (actor_A > 0).float().mean()
-                    auto_scale = actor_A.new_tensor(1.0)
-                    if bool(self.rl_cfg.get("improvement_aware", False)):
-                        ref_source = str(self.rl_cfg.get("reference_source", "rollout")).lower()
-                        if ref_source == "rollout":
-                            ref_seed = seed_base + group_size + int(self.rl_cfg.get("reference_seed_offset", 1000))
-                            tau_ref = self._sample_tau_denorm(model, data_for_policy, seed=ref_seed)
-                            ref_reward, _ = self._proxy_reward_from_tau(tau_ref, data_for_policy, gaiw)
-                        elif "pred_future_denorm" in loss_dict:
-                            ref_reward, _ = self._proxy_reward_from_tau(loss_dict["pred_future_denorm"].detach(), data_for_policy, gaiw)
-
-                    if ref_reward is not None:
-                        gate, improvement = self._compute_improvement_multiplier(
-                            reward_actor if reward_actor.dim() == 1 else reward_actor.max(dim=0).values,
-                            ref_reward,
-                        )
-                        if actor_A.dim() == 2:
-                            actor_A = actor_A * gate.unsqueeze(0)
-                        else:
-                            actor_A = actor_A * gate
-                        actor_active_frac = (gate > 0).float().mean()
-
-                    if bool(self.rl_cfg.get("auto_shrink_on_low_improvement", False)):
-                        auto_scale = self._compute_auto_shrink_scale(improvement, actor_active_frac)
-                        actor_A = actor_A * auto_scale
-
-                    if bool(self.rl_cfg.get("normalize_fm_energy", False)):
-                        denom = e_diff_actor.detach().mean().abs().clamp(
-                            min=float(self.rl_cfg.get("fm_energy_min_denom", 1e-6))
-                        )
-                        e_diff_actor = e_diff_actor / denom
-
-                    rl_actor_loss = torch.mean(e_diff_actor * actor_A)
-
-                    rl_weight = float(self.rl_cfg.get("weight", 1.0))
-                    rl_warmup_epochs = int(self.rl_cfg.get("warmup_epochs", 0))
-                    if rl_warmup_epochs > 0:
-                        rl_weight = rl_weight * min(1.0, max(0.0, (self._epoch + 1) / float(rl_warmup_epochs)))
-                    total_loss = total_loss + rl_weight * rl_actor_loss
-
-                    loss_dict["rl_rollout_penalty_mean"] = penalty_stack.mean()
-                    loss_dict["rl_rollout_reward_mean"] = reward_stack.mean()
-                    loss_dict["rl_reward_mean"] = reward_stack.mean()
-                    loss_dict["rl_adv_mean"] = A.mean()
-                    loss_dict["rl_reward_std"] = reward_stack.std(unbiased=False)
-                    loss_dict["rl_adv_std"] = A.std(unbiased=False)
-                    loss_dict["rl_pos_adv_frac"] = (A > 0).float().mean()
-                    if ref_reward is not None:
-                        loss_dict["rl_ref_reward_mean"] = ref_reward.mean()
-                    if improvement is not None:
-                        loss_dict["rl_improvement_mean"] = improvement.mean()
-                    loss_dict["rl_actor_active_frac"] = actor_active_frac
-                    loss_dict["rl_auto_scale"] = auto_scale
-                    loss_dict["rl_group_best_reward_mean"] = reward_stack.amax(dim=0).mean()
-                    loss_dict["rl_group_worst_reward_mean"] = reward_stack.amin(dim=0).mean()
-                    loss_dict["rl_group_size"] = torch.tensor(float(group_size), device=reward_stack.device)
-                    loss_dict["rl_weight_eff"] = torch.tensor(float(rl_weight), device=reward_stack.device)
-                    loss_dict["rl_actor_loss"] = rl_actor_loss
-                    loss_dict["rl_e_diff_mean"] = e_diff_actor.mean()
-                else:
-                    if reward_source == "rollout" and self.rrs_module is not None:
-                        tau_rollout = self._sample_tau_denorm(model, data_for_policy)
-                        rrs_reward, rrs_penalty = self._proxy_reward_from_tau(tau_rollout, data_for_policy, gaiw)
-                        loss_dict["rl_rollout_penalty_mean"] = rrs_penalty.mean()
-                        loss_dict["rl_rollout_reward_mean"] = rrs_reward.mean()
-                    else:
-                        rrs_penalty = loss_dict["rrs_penalty_per_sample"]
-                        rrs_reward = loss_dict["rrs_reward_per_sample"]
-                        if self.rl_cfg.get("use_gaiw", True) and gaiw is not None and not self.rrs_cfg.get("use_gaiw", True):
-                            rrs_penalty = rrs_penalty * gaiw
-                            rrs_reward = rrs_reward * gaiw
-                        rrs_reward = self._shape_rl_reward(rrs_reward)
-
-                    if bool(self.rl_cfg.get("normalize_reward", False)):
-                        r_mu = rrs_reward.mean()
-                        r_std = rrs_reward.std(unbiased=False).clamp(min=1e-6)
-                        rrs_reward_target = (rrs_reward - r_mu) / r_std
-                    else:
-                        rrs_reward_target = rrs_reward
-
-                    z = torch.stack(
-                        [
-                            loss_dict.get("ego_planning_loss_per_sample", loss_dict["ego_planning_loss"].detach()).detach().view(-1),
-                            rrs_penalty.detach().view(-1),
-                        ],
-                        dim=-1,
-                    )
-
-                    if self.value_net is None:
-                        hidden = int(self.rl_cfg.get("hidden_dim", 128))
-                        depth = int(self.rl_cfg.get("depth", 2))
-                        dropout = float(self.rl_cfg.get("dropout", 0.0))
-                        self.value_net = ValueMLP(in_dim=z.shape[-1], hidden_dim=hidden, depth=depth, dropout=dropout).to(z.device)
-                    V = self.value_net(z)
-
-                    critic_loss_type = str(self.rl_cfg.get("critic_loss", "mse")).lower()
-                    if critic_loss_type == "huber":
-                        huber_beta = float(self.rl_cfg.get("critic_huber_beta", 1.0))
-                        rl_v_loss = F.smooth_l1_loss(V, rrs_reward_target.detach(), beta=huber_beta, reduction="mean")
-                    else:
-                        rl_v_loss = torch.mean((V - rrs_reward_target.detach()) ** 2)
-
-                    A = (rrs_reward_target - V).detach()
-                    if bool(self.rl_cfg.get("normalize_adv", False)):
-                        A = (A - A.mean()) / (A.std(unbiased=False).clamp(min=1e-6))
-                    adv_clip = float(self.rl_cfg.get("adv_clip", 0.0))
-                    if adv_clip > 0:
-                        A = torch.clamp(A, min=-adv_clip, max=adv_clip)
-                    actor_A = self._transform_actor_advantage(
-                        A,
-                        positive_only=bool(self.rl_cfg.get("positive_only_adv", False)),
-                        use_negative=bool(self.rl_cfg.get("actor_use_negative_adv", False)),
-                    )
-
-                    fm_energy = loss_dict.get("ego_planning_loss_per_sample", None)
-                    if fm_energy is None:
-                        fm_energy = loss_dict["ego_planning_loss"].detach().expand_as(A)
-                    if fm_energy.dim() != 1:
-                        fm_energy = fm_energy.view(fm_energy.shape[0], -1).mean(dim=1)
-                    if bool(self.rl_cfg.get("normalize_fm_energy", False)):
-                        denom = fm_energy.detach().mean().abs().clamp(min=float(self.rl_cfg.get("fm_energy_min_denom", 1e-6)))
-                        fm_energy = fm_energy / denom
-                    rl_actor_loss = torch.mean(fm_energy * actor_A)
-
-                    rl_weight = float(self.rl_cfg.get("weight", 1.0))
-                    rl_warmup_epochs = int(self.rl_cfg.get("warmup_epochs", 0))
-                    if rl_warmup_epochs > 0:
-                        rl_weight = rl_weight * min(1.0, max(0.0, (self._epoch + 1) / float(rl_warmup_epochs)))
-                    critic_weight = float(self.rl_cfg.get("critic_weight", 1.0))
-                    critic_warmup_epochs = int(self.rl_cfg.get("critic_warmup_epochs", 0))
-                    if critic_warmup_epochs > 0:
-                        critic_weight = critic_weight * min(1.0, max(0.0, (self._epoch + 1) / float(critic_warmup_epochs)))
-                    total_loss = total_loss + rl_weight * rl_actor_loss + critic_weight * rl_v_loss
-
-                    loss_dict["rl_reward_mean"] = rrs_reward.mean()
-                    loss_dict["rl_adv_mean"] = A.mean()
-                    loss_dict["rl_reward_std"] = rrs_reward.std(unbiased=False)
-                    loss_dict["rl_adv_std"] = A.std(unbiased=False)
-                    loss_dict["rl_pos_adv_frac"] = (A > 0).float().mean()
-                    loss_dict["rl_v_mean"] = V.mean()
-                    loss_dict["rl_weight_eff"] = torch.tensor(float(rl_weight), device=rrs_reward.device)
-                    loss_dict["rl_critic_weight_eff"] = torch.tensor(float(critic_weight), device=rrs_reward.device)
-                    loss_dict["rl_v_loss"] = rl_v_loss
-                    loss_dict["rl_actor_loss"] = rl_actor_loss
+        total_loss = self._apply_standard_rl_objective(
+            model=model,
+            data_for_policy=data_for_policy,
+            loss_dict=loss_dict,
+            gaiw=gaiw,
+            total_loss=total_loss,
+        )
         
         # Return rich logging dict (total_loss keeps graph for backward; others are detached scalars)
         out: dict = {"total_loss": total_loss}
@@ -724,9 +745,20 @@ class FlowMatchingCore(Core):
         
         # graph-aware weighting stats
         if gaiw is not None:
-            out["gaiw_mean"] = gaiw.mean().detach()
-            out["gaiw_min"] = gaiw.amin().detach()
-            out["gaiw_max"] = gaiw.amax().detach()
+            gw = gaiw.detach()
+            out["gaiw_mean"] = gw.mean()
+            out["gaiw_std"] = gw.std(unbiased=False)
+            out["gaiw_min"] = gw.amin()
+            out["gaiw_max"] = gw.amax()
+            if gw.numel() >= 2:
+                q = torch.quantile(gw.float(), torch.tensor([0.5, 0.9, 0.99], device=gw.device))
+                out["gaiw_p50"] = q[0]
+                out["gaiw_p90"] = q[1]
+                out["gaiw_p99"] = q[2]
+            else:
+                out["gaiw_p50"] = gw.view(-1)[0]
+                out["gaiw_p90"] = gw.view(-1)[0]
+                out["gaiw_p99"] = gw.view(-1)[0]
         
         # RRS stats (if enabled)
         _add("rrs_loss")

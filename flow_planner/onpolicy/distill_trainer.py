@@ -147,6 +147,8 @@ def distill_trainer(cfg: DictConfig):
                         tqdm_dict["plan"] = f"{loss['ego_planning_loss'].item():.3f}"
                     if "opsd_distill_loss" in loss:
                         tqdm_dict["dist"] = f"{loss['opsd_distill_loss'].item():.3f}"
+                    if "opsd_distill_weight_eff" in loss:
+                        tqdm_dict["dw"] = f"{loss['opsd_distill_weight_eff'].item():.3f}"
                     if "opsd_improvement_mean" in loss:
                         tqdm_dict["imp"] = f"{loss['opsd_improvement_mean'].item():.3f}"
                     if "opsd_teacher_reward_mean" in loss:
@@ -188,6 +190,7 @@ def distill_trainer(cfg: DictConfig):
                 "rrs_penalty_mean",
                 "rrs_reward_mean",
                 "opsd_distill_loss",
+                "opsd_distill_weight_eff",
                 "opsd_gate",
                 "opsd_improvement_mean",
                 "opsd_teacher_reward_mean",

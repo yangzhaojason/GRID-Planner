@@ -19,6 +19,7 @@ class OPSDDistillConfig:
     teacher_ckpt_path: str = ""
     # distillation weights
     distill_weight: float = 1.0
+    distill_warmup_epochs: int = 0
     # optional scalar gate (run-level) to scale distill; kept simple for MVP
     gate_value: float = 1.0
     # trajectory weights
@@ -112,6 +113,13 @@ class OPSDDistillCore(FlowMatchingCore):
         for p in teacher_model.parameters():
             p.requires_grad_(False)
         self._teacher_model = teacher_model
+
+    def _effective_distill_weight(self) -> float:
+        weight = float(self.opsd_cfg.distill_weight)
+        warmup_epochs = int(self.opsd_cfg.distill_warmup_epochs)
+        if warmup_epochs > 0:
+            weight = weight * min(1.0, max(0.0, (self._epoch + 1) / float(warmup_epochs)))
+        return weight
 
     def _distill_loss(
         self,
@@ -405,6 +413,9 @@ class OPSDDistillCore(FlowMatchingCore):
         Single-forward student update with optional distillation from frozen teacher.
         This avoids double-running the student forward compared to calling super().train_step().
         """
+        if not self.opsd_cfg.enabled or self._teacher_model is None:
+            return super().train_step(model, data)
+
         data = self.input_aug(data)
         # Keep an unmodified copy for paper-aligned rollout computations.
         data_for_policy = data.copy(self.device)
@@ -446,6 +457,8 @@ class OPSDDistillCore(FlowMatchingCore):
                 rrs_loss = rrs_penalty_per_sample.mean() * nu
                 loss_dict["rrs_loss"] = rrs_loss
             for k, v in comps.items():
+                if k in ("rrs_penalty", "rrs_reward"):
+                    continue
                 if isinstance(v, torch.Tensor) and v.dim() == 1 and v.shape[0] == rrs_penalty_per_sample.shape[0]:
                     loss_dict[k] = v.mean()
 
@@ -469,12 +482,19 @@ class OPSDDistillCore(FlowMatchingCore):
         opsd_teacher_reward_mean = None
         opsd_improvement_mean = None
         opsd_teacher_idx_mean = None
+        opsd_distill_weight_eff = None
 
         if self.opsd_cfg.enabled and self._teacher_model is not None:
             student_pred = loss_dict.get("pred_future_denorm", None)
             if student_pred is not None:
+                distill_weight_eff = self._effective_distill_weight()
+                opsd_distill_weight_eff = torch.tensor(float(distill_weight_eff), device=total_loss.device)
                 use_unified = bool(self.opsd_cfg.unified_with_rl) and bool(self.rl_cfg.get("enabled", False))
                 has_rrs_for_adv = self.rrs_module is not None
+                has_nonzero_distill_weight = (
+                    distill_weight_eff != 0.0
+                    and float(self.opsd_cfg.gate_value) != 0.0
+                )
                 selection_source = str(self.opsd_cfg.teacher_selection_source).lower()
                 source_model = model if selection_source == "student" else self._teacher_model
                 use_rollout_teacher = (
@@ -482,8 +502,24 @@ class OPSDDistillCore(FlowMatchingCore):
                     or str(self.opsd_cfg.teacher_selection_mode).lower() == "best_of_k"
                     or bool(self.opsd_cfg.improvement_aware_gate)
                 )
+                use_custom_unified_rl = (
+                    use_unified
+                    and has_rrs_for_adv
+                    and self.opsd_cfg.paper_aligned_objective
+                    and has_nonzero_distill_weight
+                    and self._rl_algorithm in ("actor_critic", "ac", "ppo", "ppo_like")
+                )
 
-                if use_unified and has_rrs_for_adv and self.opsd_cfg.paper_aligned_objective:
+                if not use_custom_unified_rl:
+                    total_loss = self._apply_standard_rl_objective(
+                        model=model,
+                        data_for_policy=data_for_policy,
+                        loss_dict=loss_dict,
+                        gaiw=gaiw,
+                        total_loss=total_loss,
+                    )
+
+                if use_custom_unified_rl:
                         # Paper-aligned: use τ sampled from inference for reward/advantage and for e_diff surrogate.
                         pair_seed = None
                         if self.opsd_cfg.rollout_match_noise:
@@ -551,7 +587,7 @@ class OPSDDistillCore(FlowMatchingCore):
                         student_det_reward, _ = self._proxy_reward_from_tau(student_det.detach(), data_for_policy, gaiw)
                         opsd_student_reward_mean = student_det_reward.mean()
 
-                        gate_base = float(self.opsd_cfg.gate_value) * float(self.opsd_cfg.distill_weight)
+                        gate_base = float(self.opsd_cfg.gate_value) * distill_weight_eff
                         gate = torch.full_like(distill_per_sample, gate_base)
                         if bool(self.opsd_cfg.improvement_aware_gate):
                             gate_mult, improvement_pos = self._compute_improvement_multiplier(teacher_reward, student_det_reward)
@@ -575,6 +611,16 @@ class OPSDDistillCore(FlowMatchingCore):
                             )
                         rl_weight_eff = torch.tensor(float(rl_weight), device=total_loss.device)
                         rl_critic_weight_eff = torch.tensor(float(critic_weight), device=total_loss.device)
+                        loss_dict["rl_rollout_reward_mean"] = r_tilde.mean()
+                        loss_dict["rl_rollout_penalty_mean"] = rrs_pen_student.mean()
+                        loss_dict["rl_reward_mean"] = rl_reward_mean
+                        loss_dict["rl_adv_mean"] = rl_adv_mean
+                        loss_dict["rl_pos_adv_frac"] = rl_pos_adv_frac
+                        loss_dict["rl_weight_eff"] = rl_weight_eff
+                        loss_dict["rl_critic_weight_eff"] = rl_critic_weight_eff
+                        loss_dict["rl_v_loss"] = rl_v_loss
+                        loss_dict["rl_actor_loss"] = rl_actor_loss
+                        loss_dict["rl_e_diff_mean"] = e_diff_per_sample.mean()
                         if self.opsd_cfg.paper_keep_base_loss:
                             total_loss = base_total_loss + critic_weight * rl_v_loss + rl_weight * rl_actor_loss + distill_loss
                         else:
@@ -611,7 +657,7 @@ class OPSDDistillCore(FlowMatchingCore):
                         distill_per_sample = self._distill_loss(student_pred, tau_teacher)  # (B,)
                         gate = torch.full_like(
                             distill_per_sample,
-                            float(self.opsd_cfg.gate_value) * float(self.opsd_cfg.distill_weight),
+                            float(self.opsd_cfg.gate_value) * distill_weight_eff,
                         )
                         if bool(self.opsd_cfg.improvement_aware_gate):
                             gate_mult, improvement_pos = self._compute_improvement_multiplier(teacher_reward, student_reward)
@@ -628,7 +674,7 @@ class OPSDDistillCore(FlowMatchingCore):
                         if teacher_pred is not None:
                             distill_per_sample = self._distill_loss(student_pred, teacher_pred)  # (B,)
                             gate = float(self.opsd_cfg.gate_value)
-                            w = float(self.opsd_cfg.distill_weight)
+                            w = distill_weight_eff
                             distill_loss = distill_per_sample.mean() * gate * w
                             total_loss = total_loss + distill_loss
 
@@ -659,6 +705,26 @@ class OPSDDistillCore(FlowMatchingCore):
         _add("rrs_low_speed_pen")
         _add("rrs_progress")
         _add("rrs_mean_speed")
+        _add("rl_reward_mean")
+        _add("rl_rollout_reward_mean")
+        _add("rl_rollout_penalty_mean")
+        _add("rl_adv_mean")
+        _add("rl_reward_std")
+        _add("rl_adv_std")
+        _add("rl_pos_adv_frac")
+        _add("rl_ref_reward_mean")
+        _add("rl_improvement_mean")
+        _add("rl_actor_active_frac")
+        _add("rl_auto_scale")
+        _add("rl_v_mean")
+        _add("rl_weight_eff")
+        _add("rl_critic_weight_eff")
+        _add("rl_v_loss")
+        _add("rl_actor_loss")
+        _add("rl_group_best_reward_mean")
+        _add("rl_group_worst_reward_mean")
+        _add("rl_group_size")
+        _add("rl_e_diff_mean")
 
         if distill_loss is not None:
             out["opsd_distill_loss"] = distill_loss.detach()
@@ -692,5 +758,7 @@ class OPSDDistillCore(FlowMatchingCore):
             out["opsd_improvement_mean"] = opsd_improvement_mean.detach()
         if opsd_teacher_idx_mean is not None:
             out["opsd_teacher_idx_mean"] = opsd_teacher_idx_mean.detach()
+        if opsd_distill_weight_eff is not None:
+            out["opsd_distill_weight_eff"] = opsd_distill_weight_eff.detach()
 
         return out

@@ -214,6 +214,9 @@ def trainer(cfg: DictConfig):
             epoch_keys = [
                 "total_loss",
                 "ego_planning_loss",
+                "gaiw_mean",
+                "gaiw_p90",
+                "gaiw_p99",
                 "rrs_penalty_mean",
                 "rrs_reward_mean",
                 "rl_actor_loss",

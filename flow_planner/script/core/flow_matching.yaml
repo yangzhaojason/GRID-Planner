@@ -29,6 +29,7 @@ graph_weighting:
   beta_static: 0.15       # coefficient for log1p(#near_static_objects)
   beta_red: 0.25          # coefficient for log1p(#red_lane_points)
   temperature: 1.0        # soft temperature on log-weights
+  enable_clipping: true
   normalize_by_mean: true # normalize w so that mean weight is ~1
   max_weight: 10.0
   min_weight: 0.1

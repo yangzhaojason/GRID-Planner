@@ -29,7 +29,7 @@ ddp:
   rank: ${oc.env:LOCAL_RANK}
   init_process_group: nccl
   addr: ${oc.env:MASTER_ADDR, localhost}
-  port: ${oc.env:MASTER:PORT, 29529}
+  port: ${oc.env:MASTER_PORT, 29529}
 
 model_type: x_start
 

@@ -8,8 +8,6 @@ import math
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from flow_planner.onpolicy.sim_report import find_runner_report, parse_final_score_from_runner_report
-
 
 def _to_float_or_none(v: Any) -> Optional[float]:
     if v is None:
@@ -130,6 +128,7 @@ def _collect_runtime_ms_from_obj(
 
 
 def _resolve_report_input(path_like: str) -> str:
+    find_runner_report, _ = _load_sim_report_utils()
     p = Path(path_like)
     if p.is_dir():
         rr = find_runner_report(str(p))
@@ -164,8 +163,20 @@ def _resolve_runner_report_path(report_path: str) -> Optional[str]:
             if cand.exists():
                 return str(cand)
     elif p.is_dir():
+        find_runner_report, _ = _load_sim_report_utils()
         return find_runner_report(str(p))
     return None
+
+
+def _load_sim_report_utils():
+    try:
+        from flow_planner.onpolicy.sim_report import find_runner_report, parse_final_score_from_runner_report
+    except ModuleNotFoundError:
+        import sys
+
+        sys.path.append(str(Path(__file__).resolve().parents[2]))
+        from flow_planner.onpolicy.sim_report import find_runner_report, parse_final_score_from_runner_report
+    return find_runner_report, parse_final_score_from_runner_report
 
 
 def _extract_latency_ms_from_runner_report(
@@ -348,9 +359,21 @@ def main() -> None:
         action="store_true",
         help="Also print machine-readable JSON payload.",
     )
+    parser.add_argument(
+        "--json-only",
+        action="store_true",
+        help="Print only the machine-readable JSON payload.",
+    )
+    parser.add_argument(
+        "--output-json",
+        type=str,
+        default=None,
+        help="Optional path to save the machine-readable JSON payload.",
+    )
     args = parser.parse_args()
 
     report_path = _resolve_report_input(args.report)
+    _, parse_final_score_from_runner_report = _load_sim_report_utils()
     sim_score = parse_final_score_from_runner_report(report_path)
     row = sim_score.components or {}
 
@@ -407,6 +430,34 @@ def main() -> None:
         args.latency_ms, args.latency_json, report_path, args.latency_mode
     )
 
+    payload = {
+        "variant": args.variant,
+        "report_path": report_path,
+        "score_up": score,
+        "coll_down": coll_violation,
+        "red_light_down": red_light_violation,
+        "lane_dev_down": lane_dev,
+        "jerk_down": jerk_metric,
+        "latency_down_ms": latency_ms,
+        "latency_mode": args.latency_mode,
+        "source": {
+            "red_light": red_light_src,
+            "lane_dev": lane_dev_src,
+            "jerk": jerk_src,
+            "latency": latency_src,
+        },
+        "raw_components": row,
+    }
+
+    if args.output_json:
+        out_path = Path(args.output_json)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+
+    if args.json_only:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+
     print("===== Benchmark Metrics =====")
     print(f"Variant:   {args.variant}")
     print(f"Report:    {report_path}")
@@ -432,24 +483,6 @@ def main() -> None:
     )
 
     if args.json:
-        payload = {
-            "variant": args.variant,
-            "report_path": report_path,
-            "score_up": score,
-            "coll_down": coll_violation,
-            "red_light_down": red_light_violation,
-            "lane_dev_down": lane_dev,
-            "jerk_down": jerk_metric,
-            "latency_down_ms": latency_ms,
-            "latency_mode": args.latency_mode,
-            "source": {
-                "red_light": red_light_src,
-                "lane_dev": lane_dev_src,
-                "jerk": jerk_src,
-                "latency": latency_src,
-            },
-            "raw_components": row,
-        }
         print("")
         print(json.dumps(payload, ensure_ascii=False, indent=2))
 
