@@ -45,6 +45,9 @@ opsd:
   huber_beta: 1.0
   unified_with_rl: true
   dynamic_gate_with_adv: true
+  use_advantage_reweighting: true
+  use_critic_baseline: true
+  include_distill_term: true
   adv_temperature: 1.0
   adv_clip: 10.0
   paper_aligned_objective: true

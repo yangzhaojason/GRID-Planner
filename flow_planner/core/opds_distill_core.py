@@ -31,6 +31,12 @@ class OPSDDistillConfig:
     unified_with_rl: bool = True
     # distill weight w(G); can be dynamically adapted by advantage
     dynamic_gate_with_adv: bool = True
+    # ablation switch: keep the RL actor term but remove A(τ,G) reweighting
+    use_advantage_reweighting: bool = True
+    # ablation switch: use V_phi(G)=0 and drop critic regression
+    use_critic_baseline: bool = True
+    # ablation switch: keep rollout sampling but zero the OPSD projection term
+    include_distill_term: bool = True
     adv_temperature: float = 1.0
     # stabilize advantage influence
     adv_clip: float = 10.0
@@ -90,6 +96,8 @@ class OPSDDistillCore(FlowMatchingCore):
         super().__init__(**kwargs)
         self.opsd_cfg_dict = opsd or {}
         self.opsd_cfg = OPSDDistillConfig(**{k: v for k, v in self.opsd_cfg_dict.items() if k in OPSDDistillConfig.__annotations__})
+        if not self.opsd_cfg.use_critic_baseline:
+            self.value_net = None
         self._teacher_model: Optional[nn.Module] = None
         self._rollout_counter: int = 0
 
@@ -192,6 +200,34 @@ class OPSDDistillCore(FlowMatchingCore):
         if clip > 0:
             adv = torch.clamp(adv, min=-clip, max=clip)
         return adv.detach(), rl_v_loss, rrs_reward_target
+
+    def _compute_advantage_without_baseline(
+        self,
+        rrs_reward: torch.Tensor,
+    ):
+        """
+        Ablation path for V_phi(G)=0.
+        We keep the same reward shaping / normalization as the critic path, but skip
+        value regression entirely so the actor sees raw stopgrad rewards.
+        """
+        if bool(self.rl_cfg.get("normalize_reward", False)):
+            r_mu = rrs_reward.mean()
+            r_std = rrs_reward.std(unbiased=False).clamp(min=1e-6)
+            rrs_reward_target = (rrs_reward - r_mu) / r_std
+        else:
+            rrs_reward_target = rrs_reward
+
+        adv = rrs_reward_target
+        if bool(self.rl_cfg.get("normalize_adv", False)):
+            adv = (adv - adv.mean()) / (adv.std(unbiased=False).clamp(min=1e-6))
+        clip = float(self.opsd_cfg.adv_clip)
+        if clip <= 0:
+            clip = float(self.rl_cfg.get("adv_clip", 0.0))
+        if clip > 0:
+            adv = torch.clamp(adv, min=-clip, max=clip)
+
+        zero = torch.zeros((), device=rrs_reward.device, dtype=rrs_reward.dtype)
+        return adv.detach(), zero, rrs_reward_target
 
     def _sample_tau_denorm(self, model: nn.Module, data: NuPlanDataSample, seed: Optional[int] = None) -> torch.Tensor:
         """
@@ -491,10 +527,8 @@ class OPSDDistillCore(FlowMatchingCore):
                 opsd_distill_weight_eff = torch.tensor(float(distill_weight_eff), device=total_loss.device)
                 use_unified = bool(self.opsd_cfg.unified_with_rl) and bool(self.rl_cfg.get("enabled", False))
                 has_rrs_for_adv = self.rrs_module is not None
-                has_nonzero_distill_weight = (
-                    distill_weight_eff != 0.0
-                    and float(self.opsd_cfg.gate_value) != 0.0
-                )
+                use_critic_baseline = bool(self.opsd_cfg.use_critic_baseline)
+                include_distill_term = bool(self.opsd_cfg.include_distill_term)
                 selection_source = str(self.opsd_cfg.teacher_selection_source).lower()
                 source_model = model if selection_source == "student" else self._teacher_model
                 use_rollout_teacher = (
@@ -506,7 +540,6 @@ class OPSDDistillCore(FlowMatchingCore):
                     use_unified
                     and has_rrs_for_adv
                     and self.opsd_cfg.paper_aligned_objective
-                    and has_nonzero_distill_weight
                     and self._rl_algorithm in ("actor_critic", "ac", "ppo", "ppo_like")
                 )
 
@@ -554,21 +587,29 @@ class OPSDDistillCore(FlowMatchingCore):
 
                         # critic/advantage: keep value features consistent with RL-only path
                         fm_anchor = loss_dict.get("ego_planning_loss", None)
-                        adv_detach, rl_v_loss, _ = self._compute_advantage(
-                            loss_dict=loss_dict,
-                            rrs_reward=r_tilde,
-                            rrs_penalty=rrs_pen_student,
-                        )
+                        if use_critic_baseline:
+                            adv_detach, rl_v_loss, _ = self._compute_advantage(
+                                loss_dict=loss_dict,
+                                rrs_reward=r_tilde,
+                                rrs_penalty=rrs_pen_student,
+                            )
+                        else:
+                            adv_detach, rl_v_loss, _ = self._compute_advantage_without_baseline(
+                                rrs_reward=r_tilde,
+                            )
                         rl_adv_mean = adv_detach.mean()
                         rl_reward_mean = r_tilde.mean()
 
                         # actor term: reduce e_diff on better-than-baseline rollouts.
                         rl_pos_adv_frac = (adv_detach > 0).float().mean()
-                        actor_adv = self._transform_actor_advantage(
-                            adv_detach,
-                            positive_only=bool(self.opsd_cfg.positive_only_adv),
-                            use_negative=bool(self.opsd_cfg.actor_use_negative_adv),
-                        )
+                        if bool(self.opsd_cfg.use_advantage_reweighting):
+                            actor_adv = self._transform_actor_advantage(
+                                adv_detach,
+                                positive_only=bool(self.opsd_cfg.positive_only_adv),
+                                use_negative=bool(self.opsd_cfg.actor_use_negative_adv),
+                            )
+                        else:
+                            actor_adv = torch.ones_like(adv_detach)
                         e_diff_actor = e_diff_per_sample
                         if bool(self.rl_cfg.get("normalize_fm_energy", False)):
                             denom = e_diff_actor.detach().mean().abs().clamp(
@@ -597,7 +638,10 @@ class OPSDDistillCore(FlowMatchingCore):
                             adv_temp = max(1e-6, float(self.opsd_cfg.adv_temperature))
                             gate = gate * torch.sigmoid(adv_detach / adv_temp)
                         opsd_gate_mean = gate.mean()
-                        distill_loss = torch.mean(gate * distill_per_sample)
+                        if include_distill_term:
+                            distill_loss = torch.mean(gate * distill_per_sample)
+                        else:
+                            distill_loss = torch.zeros((), device=total_loss.device)
 
                         rl_weight = float(self.rl_cfg.get("weight", 1.0))
                         critic_weight = float(self.rl_cfg.get("critic_weight", 1.0))
@@ -609,6 +653,8 @@ class OPSDDistillCore(FlowMatchingCore):
                             critic_weight = critic_weight * min(
                                 1.0, max(0.0, (self._epoch + 1) / float(critic_warmup_epochs))
                             )
+                        if not use_critic_baseline:
+                            critic_weight = 0.0
                         rl_weight_eff = torch.tensor(float(rl_weight), device=total_loss.device)
                         rl_critic_weight_eff = torch.tensor(float(critic_weight), device=total_loss.device)
                         loss_dict["rl_rollout_reward_mean"] = r_tilde.mean()
@@ -664,8 +710,11 @@ class OPSDDistillCore(FlowMatchingCore):
                             gate = gate * gate_mult
                             opsd_improvement_mean = improvement_pos.mean()
                         opsd_gate_mean = gate.mean()
-                        distill_loss = torch.mean(gate * distill_per_sample)
-                        total_loss = total_loss + distill_loss
+                        if include_distill_term:
+                            distill_loss = torch.mean(gate * distill_per_sample)
+                            total_loss = total_loss + distill_loss
+                        else:
+                            distill_loss = torch.zeros((), device=total_loss.device)
                     else:
                         # Legacy/non-paper path: distill from teacher train-time prediction.
                         with torch.no_grad():
@@ -675,8 +724,11 @@ class OPSDDistillCore(FlowMatchingCore):
                             distill_per_sample = self._distill_loss(student_pred, teacher_pred)  # (B,)
                             gate = float(self.opsd_cfg.gate_value)
                             w = distill_weight_eff
-                            distill_loss = distill_per_sample.mean() * gate * w
-                            total_loss = total_loss + distill_loss
+                            if include_distill_term:
+                                distill_loss = distill_per_sample.mean() * gate * w
+                                total_loss = total_loss + distill_loss
+                            else:
+                                distill_loss = torch.zeros((), device=total_loss.device)
 
         # Build output logging dict (mirror FlowMatchingCore style)
         out: dict = {"total_loss": total_loss}
