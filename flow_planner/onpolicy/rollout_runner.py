@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -25,7 +26,7 @@ class NuPlanSimConfig:
     challenge: str = "closed_loop_reactive_agents"
 
     # Ray / distributed worker settings (keep consistent with run scripts)
-    ray_tmpdir: str = "/home/datasets_2/ray_tmp"
+    ray_tmpdir: str = field(default_factory=lambda: os.environ.get("RAY_TMPDIR") or f"/tmp/grid-ray-{os.getuid()}")
     threads_per_node: int = 64
     distributed_mode: str = "SINGLE_NODE"
     gpus_per_simulation: float = 0.15
@@ -77,9 +78,6 @@ def run_nuplan_simulation(
     # Choose scenario builder based on split (matches existing shell scripts)
     scenario_builder = "nuplan" if sim_cfg.split == "val14" else "nuplan_challenge"
 
-    # Ensure output runs even if ray tmpdir not pre-created
-    os.makedirs(sim_cfg.ray_tmpdir, exist_ok=True)
-
     # Use a unique uid to make output discovery deterministic.
     # nuPlan writes outputs under: ${NUPLAN_EXP_ROOT}/exp/simulation/<challenge>/<experiment_uid>/...
     # Make uid unique to avoid collisions when evaluating multiple checkpoints.
@@ -87,7 +85,7 @@ def run_nuplan_simulation(
     exp_uid = f"flow_planner/{sim_cfg.split}/onpolicy_opsd/{Path(ckpt_path).stem}_{ts}"
 
     cmd = [
-        "python",
+        sys.executable,
         str(Path(paths.nuplan_devkit_root) / "nuplan" / "planning" / "script" / "run_simulation.py"),
         f"+simulation={sim_cfg.challenge}",
         "planner=flow_planner",
@@ -119,6 +117,9 @@ def run_nuplan_simulation(
     if env:
         merged_env.update(env)
 
+    # Create the directory actually passed to Ray, including caller overrides.
+    os.makedirs(merged_env["RAY_TMPDIR"], exist_ok=True)
+
     proc = subprocess.run(
         cmd,
         cwd=paths.project_root,
@@ -134,4 +135,3 @@ def run_nuplan_simulation(
         output_dir = str(Path(exp_root) / "exp" / "simulation" / sim_cfg.challenge / exp_uid)
 
     return NuPlanSimRunResult(proc=proc, experiment_uid=exp_uid, output_dir=output_dir)
-

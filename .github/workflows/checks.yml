@@ -1,0 +1,32 @@
+name: Lightweight checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install lightweight build tools
+        run: python -m pip install "setuptools>=68" wheel
+      - name: Test commands and built distribution
+        run: python -m unittest discover -s tests -v
+      - name: Compile Python sources
+        run: python -m compileall -q flow_planner data_process.py print_result.py setup.py tests
+      - name: Check shell syntax
+        run: |
+          bash -n data_process.sh
+          while IFS= read -r -d '' script; do
+            bash -n "$script"
+          done < <(find flow_planner/run_script -name '*.sh' -print0)

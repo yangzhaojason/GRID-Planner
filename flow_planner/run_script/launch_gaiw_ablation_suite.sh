@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 # End-to-end GAIW ablation pipeline:
 #   1) train each variant
@@ -8,24 +9,10 @@ set -euo pipefail
 #   4) aggregate a paper-ready table
 #   5) render the GAIW stability figure
 
-: "${CUDA_VISIBLE_DEVICES:=0,1,2,3,4,5,6,7}"
-: "${WANDB_API_KEY:=null}"
-: "${HYDRA_FULL_ERROR:=1}"
-
-: "${PROJECT_ROOT:=/home/code/grid_planner}"
-: "${NUPLAN_DEVKIT_ROOT:=/home/code/grid_planner/nuplan-devkit}"
-: "${NUPLAN_DATA_ROOT:=/home/datasets_2/nuplan/}"
-: "${NUPLAN_MAPS_ROOT:=/home/datasets_2/nuplan/nuPlan-v1.1/maps}"
-: "${NUPLAN_EXP_ROOT:=/home/results/yangzhao/grid_planner}"
-
-: "${SAVE_DIR:=/home/results/yangzhao/grid_planner}"
-: "${TRAINING_DATA:=/home/datasets_2/nuplan/processed_flowplanner}"
-: "${TRAINING_JSON:=/home/code/grid_planner/flow_planner_training.json}"
-: "${PRETRAINED_CKPT:=/home/results/flow_planner/base_checkpoint/latest.pth}"
+: "${PRETRAINED_CKPT:=}"
 
 : "${TRAIN_EPOCHS:=10}"
 : "${TRAIN_SAVE_UTD:=1}"
-: "${NPROC_PER_NODE:=8}"
 : "${LR:=5e-5}"
 : "${MASTER_ADDR:=127.0.0.1}"
 : "${MASTER_PORT:=}"
@@ -46,7 +33,7 @@ set -euo pipefail
 : "${ISOLATE_RAY_TMPDIR_PER_CKPT:=true}"
 : "${CLEAN_RAY_TMPDIR_AFTER_RUN:=true}"
 : "${DELETE_RESULT_DIR_AFTER_PARSE:=false}"
-: "${RAY_TMPDIR_ROOT:=${RAY_TMPDIR:-/home/results/ray}}"
+: "${RAY_TMPDIR_ROOT:=${RAY_TMPDIR}}"
 : "${RAY_TMPDIR_ALIAS_ROOT:=/tmp}"
 : "${LATENCY_MODE:=compute_trajectory_only}"
 
@@ -76,7 +63,6 @@ if [ ! -d "${NUPLAN_DEVKIT_ROOT}" ]; then
 fi
 
 export CUDA_VISIBLE_DEVICES
-export WANDB_API_KEY
 export HYDRA_FULL_ERROR
 export PROJECT_ROOT
 export SAVE_DIR
@@ -92,7 +78,6 @@ export NCCL_IB_DISABLE
 export NCCL_DEBUG
 export TORCH_NCCL_ASYNC_ERROR_HANDLING
 export TORCH_LOGS="${TORCH_LOGS:-dynamic,recompiles}"
-export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 mkdir -p "${NUPLAN_EXP_ROOT}"
 export RAY_TMPDIR="${RAY_TMPDIR_ROOT}"
 export RAY_DISABLE_DASHBOARD=1
@@ -102,7 +87,7 @@ export RAY_ENABLE_METRICS_AGENT=false
 export RAY_METRICS_EXPORT_PORT=0
 export RAY_OBJECT_STORE_ALLOW_SLOW_STORAGE="${RAY_OBJECT_STORE_ALLOW_SLOW_STORAGE:-1}"
 if [ -d /dev/shm ]; then
-  SHM_AVAIL_BYTES="$(python - <<'PY'
+  SHM_AVAIL_BYTES="$("${PYTHON_BIN}" - <<'PY'
 import os
 st = os.statvfs("/dev/shm")
 print(st.f_bavail * st.f_frsize)
@@ -123,7 +108,7 @@ else
 fi
 
 pick_free_port() {
-  python - <<'PY'
+  "${PYTHON_BIN}" - <<'PY'
 import socket
 
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -145,7 +130,7 @@ stop_ray_if_requested() {
 }
 
 make_private_ray_tmpdir_pair() {
-  python - "${RAY_TMPDIR_ROOT}" "${RAY_TMPDIR_ALIAS_ROOT}" "$1" <<'PY'
+  "${PYTHON_BIN}" - "${RAY_TMPDIR_ROOT}" "${RAY_TMPDIR_ALIAS_ROOT}" "$1" <<'PY'
 from pathlib import Path
 import hashlib
 import sys
@@ -164,7 +149,7 @@ PY
 }
 
 assert_ray_socket_path_safe() {
-  python - "$1" <<'PY'
+  "${PYTHON_BIN}" - "$1" <<'PY'
 import sys
 
 base = sys.argv[1].rstrip("/")
@@ -269,7 +254,7 @@ EOF
 }
 
 collect_ckpt_names() {
-  python - "$1" <<'PY'
+  "${PYTHON_BIN}" - "$1" <<'PY'
 from pathlib import Path
 import sys
 
@@ -291,6 +276,7 @@ PY
 }
 
 train_variant() {
+  grid_require_file PRETRAINED_CKPT "${PRETRAINED_CKPT}"
   local variant="$1"
   local run_dir="${SUITE_RUNS_DIR}/${variant}"
   local tb_dir="${run_dir}/tensorboard"
@@ -303,7 +289,7 @@ train_variant() {
   fi
 
   local -a train_cmd=(
-    python -m torch.distributed.run
+    "${PYTHON_BIN}" -m torch.distributed.run
     --nnodes 1
     --nproc-per-node "${NPROC_PER_NODE}"
     --master_addr "${MASTER_ADDR}"
@@ -335,7 +321,7 @@ train_variant() {
 }
 
 append_eval_row() {
-  python - "$@" <<'PY'
+  "${PYTHON_BIN}" - "$@" <<'PY'
 import csv
 import json
 import re
@@ -413,7 +399,7 @@ evaluate_variant() {
   fi
 
   : > "${jsonl_path}"
-  python - "${csv_path}" <<'PY'
+  "${PYTHON_BIN}" - "${csv_path}" <<'PY'
 import csv
 import sys
 
@@ -437,7 +423,10 @@ with open(sys.argv[1], "w", newline="") as f:
     writer.writeheader()
 PY
 
-  mapfile -t ckpt_names < <(collect_ckpt_names "${run_dir}")
+  ckpt_names=()
+  while IFS= read -r ckpt_name; do
+    ckpt_names+=("${ckpt_name}")
+  done < <(collect_ckpt_names "${run_dir}")
   if [ "${#ckpt_names[@]}" -eq 0 ]; then
     echo "No checkpoints found for variant ${variant} under ${run_dir}"
     exit 1
@@ -497,10 +486,10 @@ PY
       )
     fi
 
-    if RAY_TMPDIR="${ray_tmpdir_for_run}" PYTHONUNBUFFERED=1 python -u "${NUPLAN_DEVKIT_ROOT}/nuplan/planning/script/run_simulation.py" \
+    if RAY_TMPDIR="${ray_tmpdir_for_run}" PYTHONUNBUFFERED=1 "${PYTHON_BIN}" -u "${NUPLAN_DEVKIT_ROOT}/nuplan/planning/script/run_simulation.py" \
       "${SIM_ARGS[@]}" \
       2>&1 | tee "${log_file}"; then
-      if python "${PROJECT_ROOT}/flow_planner/onpolicy/benchmark_table.py" \
+      if "${PYTHON_BIN}" "${PROJECT_ROOT}/flow_planner/onpolicy/benchmark_table.py" \
         --report "${result_dir}" \
         --variant "${variant}" \
         --latency-mode "${LATENCY_MODE}" \
@@ -533,7 +522,7 @@ for variant in "${selected_variants[@]}"; do
 done
 
 if [ "${RUN_SUMMARY}" = "true" ]; then
-  python "${PROJECT_ROOT}/flow_planner/onpolicy/gaiw_ablation_collect.py" \
+  "${PYTHON_BIN}" "${PROJECT_ROOT}/flow_planner/onpolicy/gaiw_ablation_collect.py" \
     --suite-root "${SUITE_ROOT}" \
     --output-dir "${SUITE_SUMMARY_DIR}"
 fi

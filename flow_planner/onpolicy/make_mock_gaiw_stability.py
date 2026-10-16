@@ -1,3 +1,8 @@
+"""Generate synthetic illustration data, never measured benchmark results.
+
+This optional plotting aid is excluded from the training/evaluation workflow.
+Outputs marked ``mock://`` must not be used to substantiate paper metrics.
+"""
 from __future__ import annotations
 
 import argparse

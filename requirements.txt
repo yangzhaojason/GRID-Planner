@@ -9,3 +9,14 @@ torchvision==0.18.0
 tensorboard==2.11.2
 timm==1.0.10
 wandb==0.17.4
+
+# Direct imports and report/plot helpers used by this repository.
+numpy<2
+tqdm
+torchinfo
+pandas
+matplotlib
+shapely>=2
+pyarrow
+
+# Install nuplan-devkit separately as described in README.md.

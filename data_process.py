@@ -1,13 +1,7 @@
 import os
 import argparse
 import json
-
-from flow_planner.data.data_process.data_processor import DataProcessor
-
-from nuplan.planning.utils.multithreading.worker_parallel import SingleMachineParallelExecutor
-from nuplan.planning.scenario_builder.scenario_filter import ScenarioFilter
-from nuplan.planning.scenario_builder.nuplan_db.nuplan_scenario_builder import NuPlanScenarioBuilder
-from nuplan.planning.scenario_builder.nuplan_db.nuplan_scenario_utils import ScenarioMapping
+from pathlib import Path
 
 def get_filter_parameters(num_scenarios_per_type=None, limit_total_scenarios=None, shuffle=True, scenario_tokens=None, log_names=None):
 
@@ -33,15 +27,32 @@ def get_filter_parameters(num_scenarios_per_type=None, limit_total_scenarios=Non
     return scenario_types, scenario_tokens, log_names, map_names, num_scenarios_per_type, limit_total_scenarios, timestamp_threshold_s, ego_displacement_minimum_m, \
            expand_scenarios, remove_invalid_goals, shuffle, ego_start_speed_threshold, ego_stop_speed_threshold, speed_noise_tolerance
 
-if __name__ == "__main__":
+def parse_bool(value):
+    if value.lower() in {"true", "1", "yes"}:
+        return True
+    if value.lower() in {"false", "0", "no"}:
+        return False
+    raise argparse.ArgumentTypeError("expected true or false")
+
+
+def write_data_list(save_path, output_json):
+    """Write a stable index of processed files, relative to the dataset root."""
+    npz_files = sorted(p.name for p in Path(save_path).glob("*.npz") if p.is_file())
+    output = Path(output_json)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(npz_files, indent=2) + "\n", encoding="utf-8")
+    return len(npz_files)
+
+
+def build_parser():
     parser = argparse.ArgumentParser(description='Data Processing')
-    parser.add_argument('--data_path', default='/data/nuplan-v1.1/trainval', type=str, help='path to raw data')
-    parser.add_argument('--map_path', default='/data/nuplan-v1.1/maps', type=str, help='path to map data')
+    parser.add_argument('--data_path', required=True, type=str, help='path to raw data')
+    parser.add_argument('--map_path', required=True, type=str, help='path to map data')
 
     parser.add_argument('--save_path', default='./cache', type=str, help='path to save processed data')
     parser.add_argument('--scenarios_per_type', type=int, default=None, help='number of scenarios per type')
     parser.add_argument('--total_scenarios', type=int, default=10, help='limit total number of scenarios')
-    parser.add_argument('--shuffle_scenarios', type=bool, default=True, help='shuffle scenarios')
+    parser.add_argument('--shuffle_scenarios', type=parse_bool, default=True, help='shuffle scenarios')
 
     parser.add_argument('--agent_num', type=int, help='number of agents', default=32)
     parser.add_argument('--static_objects_num', type=int, help='number of static objects', default=5)
@@ -51,7 +62,26 @@ if __name__ == "__main__":
 
     parser.add_argument('--route_len', type=int, help='number of route lane point', default=20)
     parser.add_argument('--route_num', type=int, help='number of route lanes', default=25)
-    args = parser.parse_args()
+    parser.add_argument('--log_names', default=str(Path(__file__).resolve().with_name('nuplan_train.json')),
+                        help='JSON list of training log names')
+    parser.add_argument('--output_json', default=None,
+                        help='dataset index output (default: SAVE_PATH/flow_planner_training.json)')
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
+    args.data_path = str(Path(args.data_path).expanduser().resolve())
+    args.map_path = str(Path(args.map_path).expanduser().resolve())
+    args.save_path = str(Path(args.save_path).expanduser().resolve())
+    output_json = args.output_json or str(Path(args.save_path) / 'flow_planner_training.json')
+
+    # Keep --help and manifest utilities usable before installing the training stack.
+    from flow_planner.data.data_process.data_processor import DataProcessor
+
+    from nuplan.planning.utils.multithreading.worker_parallel import SingleMachineParallelExecutor
+    from nuplan.planning.scenario_builder.scenario_filter import ScenarioFilter
+    from nuplan.planning.scenario_builder.nuplan_db.nuplan_scenario_builder import NuPlanScenarioBuilder
 
     # create save folder
     os.makedirs(args.save_path, exist_ok=True)
@@ -60,7 +90,7 @@ if __name__ == "__main__":
     db_files = None
 
     # Only preprocess the training data
-    with open('./nuplan_train.json', "r", encoding="utf-8") as file:
+    with open(Path(args.log_names).expanduser(), "r", encoding="utf-8") as file:
         log_names = json.load(file)
     print("loading nuplan dataset... (This might take few minutes)")
     map_version = "nuplan-maps-v1.0"    
@@ -76,10 +106,9 @@ if __name__ == "__main__":
     processor = DataProcessor(args)
     processor.work(scenarios)
 
-    npz_files = [f for f in os.listdir(args.save_path) if f.endswith('.npz')]
+    count = write_data_list(args.save_path, output_json)
+    print(f"Saved {count} .npz file names to {output_json}")
 
-    # Save the list to a JSON file
-    with open('./flow_planner_training.json', 'w') as json_file:
-        json.dump(npz_files, json_file, indent=4)
 
-    print(f"Saved {len(npz_files)} .npz file names")
+if __name__ == "__main__":
+    main()

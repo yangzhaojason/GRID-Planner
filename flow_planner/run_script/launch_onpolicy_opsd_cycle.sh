@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 # On-policy self-distillation outer loop:
 #   For each cycle k:
@@ -8,24 +9,16 @@ set -euo pipefail
 #     3) Set student(k+1) = distilled checkpoint of this cycle
 #
 # Usage:
-#   RUN_DIR=/home/results/.../flow_planner_standard/<timestamp> \
+#   RUN_DIR=/path/to/training-run \
 #   SPLIT=val14 \
 #   bash flow_planner/run_script/launch_onpolicy_opsd_cycle.sh
 #
 # Assumes the same env vars as existing launch scripts (PROJECT_ROOT, NUPLAN_DEVKIT_ROOT, etc.).
 
-: "${PROJECT_ROOT:=/home/code/grid_planner}"
-: "${SAVE_DIR:=/home/results/yangzhao/grid_planner}"
-: "${TENSORBOARD_LOG_PATH:=/home/results/yangzhao/grid_planner/tensorboard}"
-: "${TRAINING_DATA:=/home/datasets_2/nuplan/processed_flowplanner}"
-: "${TRAINING_JSON:=/home/code/grid_planner/flow_planner_training.json}"
-: "${NUPLAN_DEVKIT_ROOT:=/home/code/grid_planner/nuplan-devkit}"
-: "${NUPLAN_DATA_ROOT:=/home/datasets_2/nuplan/}"
-: "${NUPLAN_MAPS_ROOT:=/home/datasets_2/nuplan/nuPlan-v1.1/maps}"
 : "${RUN_DIR:=}"
 : "${SPLIT:=val14}"
 : "${CHALLENGE:=closed_loop_reactive_agents}"
-: "${TEACHER_SIM_OUTPUT_ROOT:=/home/datasets_2/nuplan/nuPlan-v1.1/exp}"
+: "${TEACHER_SIM_OUTPUT_ROOT:=${NUPLAN_EXP_ROOT}}"
 # self-distillation loop controls
 : "${NUM_CYCLES:=3}"
 : "${START_FROM_STEP:=select}"   # select | distill (distill only applies to first cycle)
@@ -47,7 +40,6 @@ set -euo pipefail
 : "${RL_WEIGHT:=1.0}"
 : "${RL_CRITIC_WEIGHT:=1.0}"
 # distributed / NCCL stability knobs
-: "${NPROC_PER_NODE:=8}"
 : "${NCCL_IB_DISABLE:=1}"
 : "${NCCL_P2P_DISABLE:=0}"
 : "${TORCH_NCCL_ASYNC_ERROR_HANDLING:=1}"
@@ -96,7 +88,6 @@ if [ ! -d "${NUPLAN_MAPS_ROOT}" ]; then
 fi
 
 cd "${PROJECT_ROOT}"
-export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 export SAVE_DIR
 export TENSORBOARD_LOG_PATH
 export TRAINING_DATA
@@ -161,49 +152,35 @@ for (( CYCLE=1; CYCLE<=NUM_CYCLES; CYCLE++ )); do
     fi
   else
     echo "[Cycle ${CYCLE}] [1/2] Selecting teacher checkpoint by nuPlan score..."
-    if [ "${TEACHER_CANDIDATE_MODE}" = "latest" ]; then
-      python -c "from flow_planner.onpolicy.teacher_select import select_teacher_checkpoint_by_sim_score; \
-from flow_planner.onpolicy.rollout_runner import NuPlanSimPaths, NuPlanSimConfig; \
-res = select_teacher_checkpoint_by_sim_score( \
-  paths=NuPlanSimPaths(project_root='${PROJECT_ROOT}', nuplan_devkit_root='${NUPLAN_DEVKIT_ROOT}'), \
-  run_dir='${CURRENT_STUDENT_RUN_DIR}', \
-  candidates=['${CURRENT_STUDENT_RUN_DIR}/latest.pth'], \
-  sim_cfg=NuPlanSimConfig(split='${SPLIT}', challenge='${CHALLENGE}'), \
-  sim_output_root='${TEACHER_SIM_OUTPUT_ROOT}', \
-  persist_json=True); \
-print('TEACHER_CKPT=' + res.teacher_ckpt_path); \
-print('BEST_SCORE=' + str(res.best_score))" | tee "${CURRENT_STUDENT_RUN_DIR}/teacher_select_cycle${CYCLE}.log"
-    elif [ "${TEACHER_CANDIDATE_MODE}" = "recent_k" ]; then
-      python -c "from pathlib import Path; \
-from flow_planner.onpolicy.teacher_select import select_teacher_checkpoint_by_sim_score; \
-from flow_planner.onpolicy.rollout_runner import NuPlanSimPaths, NuPlanSimConfig; \
-p=Path('${CURRENT_STUDENT_RUN_DIR}'); \
-latest=str((p/'latest.pth').resolve()); \
-eps=sorted(list(p.glob('model_epoch_*.pth')), key=lambda x: int(x.name.split('_')[2]) if x.name.startswith('model_epoch_') else -1, reverse=True); \
-k=int('${TEACHER_RECENT_K}'); \
-cands=[latest] + [str(x.resolve()) for x in eps[:k]]; \
-res = select_teacher_checkpoint_by_sim_score( \
-  paths=NuPlanSimPaths(project_root='${PROJECT_ROOT}', nuplan_devkit_root='${NUPLAN_DEVKIT_ROOT}'), \
-  run_dir='${CURRENT_STUDENT_RUN_DIR}', \
-  candidates=cands, \
-  sim_cfg=NuPlanSimConfig(split='${SPLIT}', challenge='${CHALLENGE}'), \
-  sim_output_root='${TEACHER_SIM_OUTPUT_ROOT}', \
-  persist_json=True); \
-print('TEACHER_CKPT=' + res.teacher_ckpt_path); \
-print('BEST_SCORE=' + str(res.best_score)); \
-print('TEACHER_CANDIDATES=' + ','.join(cands))" | tee "${CURRENT_STUDENT_RUN_DIR}/teacher_select_cycle${CYCLE}.log"
-    else
-      python -c "from flow_planner.onpolicy.teacher_select import select_teacher_checkpoint_by_sim_score; \
-from flow_planner.onpolicy.rollout_runner import NuPlanSimPaths, NuPlanSimConfig; \
-res = select_teacher_checkpoint_by_sim_score( \
-  paths=NuPlanSimPaths(project_root='${PROJECT_ROOT}', nuplan_devkit_root='${NUPLAN_DEVKIT_ROOT}'), \
-  run_dir='${CURRENT_STUDENT_RUN_DIR}', \
-  sim_cfg=NuPlanSimConfig(split='${SPLIT}', challenge='${CHALLENGE}'), \
-  sim_output_root='${TEACHER_SIM_OUTPUT_ROOT}', \
-  persist_json=True); \
-print('TEACHER_CKPT=' + res.teacher_ckpt_path); \
-print('BEST_SCORE=' + str(res.best_score))" | tee "${CURRENT_STUDENT_RUN_DIR}/teacher_select_cycle${CYCLE}.log"
-    fi
+    "${PYTHON_BIN}" - "${PROJECT_ROOT}" "${NUPLAN_DEVKIT_ROOT}" \
+      "${CURRENT_STUDENT_RUN_DIR}" "${TEACHER_CANDIDATE_MODE}" "${TEACHER_RECENT_K}" \
+      "${SPLIT}" "${CHALLENGE}" "${TEACHER_SIM_OUTPUT_ROOT}" <<'PY' | tee "${CURRENT_STUDENT_RUN_DIR}/teacher_select_cycle${CYCLE}.log"
+import sys
+from pathlib import Path
+from flow_planner.onpolicy.teacher_select import select_teacher_checkpoint_by_sim_score
+from flow_planner.onpolicy.rollout_runner import NuPlanSimPaths, NuPlanSimConfig
+
+project_root, devkit_root, run_dir, mode, recent_k, split, challenge, output_root = sys.argv[1:]
+candidates = None
+if mode == "latest":
+    candidates = [str(Path(run_dir) / "latest.pth")]
+elif mode == "recent_k":
+    run_path = Path(run_dir)
+    epochs = sorted(run_path.glob("model_epoch_*.pth"), key=lambda path: int(path.name.split("_")[2]), reverse=True)
+    candidates = [str((run_path / "latest.pth").resolve())] + [str(path.resolve()) for path in epochs[:int(recent_k)]]
+res = select_teacher_checkpoint_by_sim_score(
+    paths=NuPlanSimPaths(project_root=project_root, nuplan_devkit_root=devkit_root),
+    run_dir=run_dir,
+    candidates=candidates,
+    sim_cfg=NuPlanSimConfig(split=split, challenge=challenge),
+    sim_output_root=output_root,
+    persist_json=True,
+)
+print("TEACHER_CKPT=" + res.teacher_ckpt_path)
+print("BEST_SCORE=" + str(res.best_score))
+if mode == "recent_k":
+    print("TEACHER_CANDIDATES=" + ",".join(candidates))
+PY
     TEACHER_CKPT_SELECTED=$(grep "^TEACHER_CKPT=" "${CURRENT_STUDENT_RUN_DIR}/teacher_select_cycle${CYCLE}.log" | tail -n 1 | cut -d'=' -f2- || true)
   fi
 
@@ -218,7 +195,7 @@ print('BEST_SCORE=' + str(res.best_score))" | tee "${CURRENT_STUDENT_RUN_DIR}/te
   mkdir -p "${DISTILL_DIR}"
 
   export TEACHER_CKPT="${TEACHER_CKPT_SELECTED}"
-  python -m torch.distributed.run --nnodes 1 --nproc-per-node "${NPROC_PER_NODE}" --standalone -m flow_planner.onpolicy.distill_trainer \
+  "${PYTHON_BIN}" -m torch.distributed.run --nnodes 1 --nproc-per-node "${NPROC_PER_NODE}" --standalone -m flow_planner.onpolicy.distill_trainer \
     --config-name flow_planner_standard \
     save_dir="${DISTILL_DIR}" \
     job_name="opds_distill_cycle${CYCLE}" \

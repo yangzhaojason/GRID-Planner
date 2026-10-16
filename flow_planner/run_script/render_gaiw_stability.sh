@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 INPUT_ARG="${1:-}"
 SUITE_ROOT_INPUT="${SUITE_ROOT:-}"
@@ -32,7 +33,6 @@ if [ -z "${SUITE_ROOT_INPUT}" ] && [ -z "${STABILITY_DATA_JSON}" ] && [ -z "${ST
   exit 1
 fi
 
-: "${PROJECT_ROOT:=/home/code/grid_planner}"
 : "${PLOT_MODE:=paper}"
 : "${OUTPUT_DATA_JSON:=}"
 : "${OUTPUT_DATA_CSV:=}"
@@ -50,7 +50,7 @@ fi
 mkdir -p "${FIG_OUT_DIR}"
 
 cmd=(
-  python "${PROJECT_ROOT}/flow_planner/onpolicy/gaiw_stability_plot.py"
+  "${PYTHON_BIN}" "${PROJECT_ROOT}/flow_planner/onpolicy/gaiw_stability_plot.py"
   --plot-mode "${PLOT_MODE}"
   --output-png "${FIG_OUT_DIR}/gaiw_stability.png"
   --output-svg "${FIG_OUT_DIR}/gaiw_stability.svg"

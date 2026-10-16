@@ -1,23 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 # Batch-evaluate all saved epoch checkpoints under a training run directory.
 # Usage:
-#   RUN_DIR=/home/results/.../2026-03-16_01-49-59 \
+#   RUN_DIR=/path/to/training-run \
 #   bash flow_planner/run_script/launch_sim_nuplan_all_epochs.sh
 #
 # Or:
-#   bash flow_planner/run_script/launch_sim_nuplan_all_epochs.sh /home/results/.../2026-03-16_01-49-59
+#   bash flow_planner/run_script/launch_sim_nuplan_all_epochs.sh /path/to/training-run
 
-: "${CUDA_VISIBLE_DEVICES:=0,1,2,3,4,5,6,7}"
 export CUDA_VISIBLE_DEVICES
-export HYDRA_FULL_ERROR=1
-
-: "${PROJECT_ROOT:=/home/code/grid_planner}"
-: "${NUPLAN_DEVKIT_ROOT:=/home/code/grid_planner/nuplan-devkit}"
-: "${NUPLAN_DATA_ROOT:=/home/datasets_2/nuplan/}"
-: "${NUPLAN_MAPS_ROOT:=/home/datasets_2/nuplan/nuPlan-v1.1/maps}"
-: "${NUPLAN_EXP_ROOT:=/home/results/yangzhao/grid_planner}"
 
 : "${SPLIT:=val14}"
 : "${CHALLENGE:=closed_loop_reactive_agents}"
@@ -30,7 +23,7 @@ export HYDRA_FULL_ERROR=1
 : "${ISOLATE_RAY_TMPDIR_PER_CKPT:=true}"
 : "${CLEAN_RAY_TMPDIR_AFTER_RUN:=true}"
 : "${DELETE_RESULT_DIR_AFTER_PARSE:=false}"
-: "${RAY_TMPDIR_ROOT:=${RAY_TMPDIR:-/home/results/ray}}"
+: "${RAY_TMPDIR_ROOT:=${RAY_TMPDIR}}"
 : "${RAY_TMPDIR_ALIAS_ROOT:=/tmp}"
 : "${CKPT_GLOB:=model_epoch_*.pth}"
 : "${INCLUDE_LATEST:=false}"
@@ -74,7 +67,7 @@ if [ ! -d "${RUN_DIR}" ]; then
   exit 1
 fi
 
-CONFIG_FILE="${RUN_DIR}/.hydra/config.yaml"
+: "${CONFIG_FILE:=${RUN_DIR}/.hydra/config.yaml}"
 if [ ! -f "${CONFIG_FILE}" ]; then
   echo "Config not found: ${CONFIG_FILE}"
   exit 1
@@ -87,7 +80,6 @@ export NUPLAN_MAPS_ROOT
 export NUPLAN_EXP_ROOT
 export SPLIT
 export CHALLENGE
-export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 mkdir -p "${NUPLAN_EXP_ROOT}"
 export RAY_TMPDIR="${RAY_TMPDIR_ROOT}"
 mkdir -p "${RAY_TMPDIR_ROOT}"
@@ -101,7 +93,7 @@ export RAY_METRICS_EXPORT_PORT=0
 # storage under RAY_TMPDIR instead of failing object-store startup outright.
 export RAY_OBJECT_STORE_ALLOW_SLOW_STORAGE="${RAY_OBJECT_STORE_ALLOW_SLOW_STORAGE:-1}"
 if [ -d /dev/shm ]; then
-  SHM_AVAIL_BYTES="$(python - <<'PY'
+  SHM_AVAIL_BYTES="$("${PYTHON_BIN}" - <<'PY'
 import os
 st = os.statvfs("/dev/shm")
 print(st.f_bavail * st.f_frsize)
@@ -135,7 +127,7 @@ stop_ray_if_requested() {
 }
 
 make_private_ray_tmpdir_pair() {
-  python - "${RAY_TMPDIR_ROOT}" "${RAY_TMPDIR_ALIAS_ROOT}" "$1" <<'PY'
+  "${PYTHON_BIN}" - "${RAY_TMPDIR_ROOT}" "${RAY_TMPDIR_ALIAS_ROOT}" "$1" <<'PY'
 from pathlib import Path
 import hashlib
 import sys
@@ -154,7 +146,7 @@ PY
 }
 
 assert_ray_socket_path_safe() {
-  python - "$1" <<'PY'
+  "${PYTHON_BIN}" - "$1" <<'PY'
 import sys
 
 base = sys.argv[1].rstrip("/")
@@ -211,7 +203,7 @@ print_task_submit_log() {
     return 0
   fi
 
-  matched="$(python - "${log_file}" <<'PY'
+  matched="$("${PYTHON_BIN}" - "${log_file}" <<'PY'
 import sys
 
 path = sys.argv[1]
@@ -241,7 +233,7 @@ choose_eval_artifact_dir() {
   fi
 
   if [ "${RESUME_EVAL}" = "true" ]; then
-    python - "${RUN_DIR}" "${SPLIT}" "${CHALLENGE}" <<'PY'
+    "${PYTHON_BIN}" - "${RUN_DIR}" "${SPLIT}" "${CHALLENGE}" <<'PY'
 from pathlib import Path
 import sys
 
@@ -269,7 +261,7 @@ upsert_summary() {
   local status="$3"
   local result_dir="$4"
 
-  python - "${SUMMARY_CSV}" "${SUMMARY_TXT}" "${checkpoint}" "${score}" "${status}" "${result_dir}" <<'PY'
+  "${PYTHON_BIN}" - "${SUMMARY_CSV}" "${SUMMARY_TXT}" "${checkpoint}" "${score}" "${status}" "${result_dir}" <<'PY'
 import csv
 import os
 import sys
@@ -332,7 +324,7 @@ PY
 
 get_checkpoint_status() {
   local checkpoint="$1"
-  python - "${SUMMARY_CSV}" "${checkpoint}" <<'PY'
+  "${PYTHON_BIN}" - "${SUMMARY_CSV}" "${checkpoint}" <<'PY'
 import csv
 import os
 import sys
@@ -357,7 +349,7 @@ PY
 should_skip_checkpoint() {
   local checkpoint="$1"
   local status="${2:-}"
-  python - "${RESUME_SKIP_STATUSES}" "${status}" <<'PY'
+  "${PYTHON_BIN}" - "${RESUME_SKIP_STATUSES}" "${status}" <<'PY'
 import sys
 
 skip_statuses = {s.strip() for s in sys.argv[1].split(",") if s.strip()}
@@ -382,8 +374,11 @@ handle_interrupt() {
 
 trap handle_interrupt INT TERM
 
-mapfile -t CKPT_NAMES < <(
-  python - "${RUN_DIR}" "${CKPT_GLOB}" "${INCLUDE_LATEST}" <<'PY'
+CKPT_NAMES=()
+while IFS= read -r ckpt_name; do
+  CKPT_NAMES+=("${ckpt_name}")
+done < <(
+  "${PYTHON_BIN}" - "${RUN_DIR}" "${CKPT_GLOB}" "${INCLUDE_LATEST}" <<'PY'
 from pathlib import Path
 import sys
 
@@ -517,12 +512,12 @@ for CKPT_NAME in "${CKPT_NAMES[@]}"; do
     )
   fi
 
-  if RAY_TMPDIR="${RAY_TMPDIR_FOR_RUN}" PYTHONUNBUFFERED=1 python -u "${NUPLAN_DEVKIT_ROOT}/nuplan/planning/script/run_simulation.py" \
+  if RAY_TMPDIR="${RAY_TMPDIR_FOR_RUN}" PYTHONUNBUFFERED=1 "${PYTHON_BIN}" -u "${NUPLAN_DEVKIT_ROOT}/nuplan/planning/script/run_simulation.py" \
       "${SIM_ARGS[@]}" \
       2>&1 | tee "${LOG_FILE}"; then
     print_task_submit_log "${LOG_FILE}"
 
-    if SCORE="$(python - "${RESULT_DIR}/runner_report.parquet" <<'PY'
+    if SCORE="$("${PYTHON_BIN}" - "${RESULT_DIR}/runner_report.parquet" <<'PY'
 import glob
 import os
 import sys
@@ -566,7 +561,7 @@ PY
 done
 
 echo ""
-python - "${SUMMARY_CSV}" <<'PY'
+"${PYTHON_BIN}" - "${SUMMARY_CSV}" <<'PY'
 import csv
 import sys
 

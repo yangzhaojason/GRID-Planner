@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 INPUT_ARG="${1:-}"
 SUITE_ROOT_INPUT="${SUITE_ROOT:-}"
@@ -25,7 +26,6 @@ if [ -z "${SUITE_ROOT_INPUT}" ] && [ -z "${GRID_OBJ_DATA_JSON}" ]; then
   exit 1
 fi
 
-: "${PROJECT_ROOT:=/home/code/grid_planner}"
 : "${PRIMARY_SPLIT:=val14}"
 : "${PLOT_VARIANTS:=unified_objective,no_advantage_reweighting,no_opsd_term}"
 : "${OUTPUT_DATA_JSON:=}"
@@ -42,7 +42,7 @@ fi
 mkdir -p "${FIG_OUT_DIR}"
 
 cmd=(
-  python "${PROJECT_ROOT}/flow_planner/onpolicy/grid_obj_sample_eff_plot.py"
+  "${PYTHON_BIN}" "${PROJECT_ROOT}/flow_planner/onpolicy/grid_obj_sample_eff_plot.py"
   --primary-split "${PRIMARY_SPLIT}"
   --variants "${PLOT_VARIANTS}"
   --output-png "${FIG_OUT_DIR}/grid_obj_sample_eff.png"

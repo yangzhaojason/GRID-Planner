@@ -1,0 +1,36 @@
+cff-version: 1.2.0
+message: "If you use GRID-Planner, please cite the paper below and acknowledge the upstream Flow Planner implementation."
+type: software
+title: GRID-Planner
+repository-code: "https://github.com/yangzhaojason/GRID-Planner"
+license: MIT
+authors:
+  - family-names: Yang
+    given-names: Zhao
+  - family-names: Qian
+    given-names: Zezhong
+  - family-names: Shi
+    given-names: Yinan
+  - family-names: Liu
+    given-names: Longjun
+  - family-names: Jueluo
+    given-names: Yawei
+preferred-citation:
+  type: conference-paper
+  title: "GRID-Planner: Graph-Structured Relational Reward Shaping for Diffusion Planning"
+  authors:
+    - family-names: Yang
+      given-names: Zhao
+    - family-names: Qian
+      given-names: Zezhong
+    - family-names: Shi
+      given-names: Yinan
+    - family-names: Liu
+      given-names: Longjun
+    - family-names: Jueluo
+      given-names: Yawei
+  collection-title: "Proceedings of the 34th ACM International Conference on Multimedia"
+  year: 2026
+  doi: "10.1145/3767308.3835263"
+  publisher:
+    name: Association for Computing Machinery

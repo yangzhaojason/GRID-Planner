@@ -77,9 +77,6 @@ def print_final_score_from_parquet(file_path: str):
     except Exception as e:
         # Handle any other unexpected errors
         print(f"Error while processing '{file_path}': {e}")
-'''
-python print_result.py /home/datasets_2/nuplan/nuPlan-v1.1/exp/exp/simulation/closed_loop_nonreactive_agents/flow_planner/val14/flow_planner_graph_weighting_ft/latest_2026-02-03-07-54-36/runner_report.parquet
-'''
 def main():
     """
     Parse command-line arguments and invoke the processing function.
@@ -89,17 +86,11 @@ def main():
     )
     parser.add_argument(
         "file_path",
-        nargs="?",
-        default=None,
         help="Path to the Parquet file (prefer: .../aggregator_metric/...weighted_average_metrics_*.parquet).",
     )
 
-    # Default example (used only when you don't pass file_path)
-    default_file_path = "/home/datasets_2/nuplan/nuPlan-v1.1/exp/exp/simulation/closed_loop_reactive_agents/flow_planner/val14/flow_planner_base/latest_2025-12-16-08-33-03/aggregator_metric/closed_loop_reactive_agents_weighted_average_metrics_2025.12.16.08.33.17.parquet"
-
     args = parser.parse_args()
-    file_path = args.file_path or default_file_path
-    print_final_score_from_parquet(file_path)
+    print_final_score_from_parquet(args.file_path)
 
 if __name__ == "__main__":
     # Script entrypoint

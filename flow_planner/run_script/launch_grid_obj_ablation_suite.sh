@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 # End-to-end unified objective ablation pipeline:
 #   1) resolve teacher checkpoints from a fixed teacher pool
@@ -8,19 +9,6 @@ set -euo pipefail
 #   4) pick the best PRIMARY_SPLIT checkpoint and evaluate it on REPORT_SPLITS
 #   5) aggregate the paper table and render the sample-efficiency figure
 
-: "${CUDA_VISIBLE_DEVICES:=0,1,2,3,4,5,6,7}"
-: "${WANDB_API_KEY:=null}"
-: "${HYDRA_FULL_ERROR:=1}"
-
-: "${PROJECT_ROOT:=/home/code/grid_planner}"
-: "${NUPLAN_DEVKIT_ROOT:=/home/code/grid_planner/nuplan-devkit}"
-: "${NUPLAN_DATA_ROOT:=/home/datasets_2/nuplan/}"
-: "${NUPLAN_MAPS_ROOT:=/home/datasets_2/nuplan/nuPlan-v1.1/maps}"
-: "${NUPLAN_EXP_ROOT:=/home/results/yangzhao/grid_planner}"
-
-: "${SAVE_DIR:=/home/results/yangzhao/grid_planner}"
-: "${TRAINING_DATA:=/home/datasets_2/nuplan/processed_flowplanner}"
-: "${TRAINING_JSON:=/home/code/grid_planner/flow_planner_training.json}"
 : "${BASE_RUN_DIR:=}"
 : "${TEACHER_POOL_RUN_DIR:=}"
 : "${PRETRAINED_CKPT:=}"
@@ -37,7 +25,6 @@ set -euo pipefail
 : "${TRAIN_SAVE_UTD:=1}"
 : "${TRAIN_BATCH_SIZE:=2048}"
 : "${SCHEDULER_WARMUP_EPOCHS:=1}"
-: "${NPROC_PER_NODE:=8}"
 : "${LR:=5e-5}"
 : "${MASTER_ADDR:=127.0.0.1}"
 : "${MASTER_PORT:=}"
@@ -60,7 +47,7 @@ set -euo pipefail
 : "${ISOLATE_RAY_TMPDIR_PER_CKPT:=true}"
 : "${CLEAN_RAY_TMPDIR_AFTER_RUN:=true}"
 : "${DELETE_RESULT_DIR_AFTER_PARSE:=false}"
-: "${RAY_TMPDIR_ROOT:=${RAY_TMPDIR:-/home/results/ray}}"
+: "${RAY_TMPDIR_ROOT:=${RAY_TMPDIR}}"
 : "${RAY_TMPDIR_ALIAS_ROOT:=/tmp}"
 : "${LATENCY_MODE:=compute_trajectory_only}"
 
@@ -147,7 +134,6 @@ mkdir -p \
   "${SUITE_TEACHER_DIR}"
 
 export CUDA_VISIBLE_DEVICES
-export WANDB_API_KEY
 export HYDRA_FULL_ERROR
 export PROJECT_ROOT
 export SAVE_DIR
@@ -163,7 +149,6 @@ export NCCL_IB_DISABLE
 export NCCL_DEBUG
 export TORCH_NCCL_ASYNC_ERROR_HANDLING
 export TORCH_LOGS="${TORCH_LOGS:-dynamic,recompiles}"
-export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 export RAY_TMPDIR="${RAY_TMPDIR_ROOT}"
 export RAY_DISABLE_DASHBOARD=1
 export RAY_USAGE_STATS_ENABLED=0
@@ -174,7 +159,7 @@ export RAY_OBJECT_STORE_ALLOW_SLOW_STORAGE="${RAY_OBJECT_STORE_ALLOW_SLOW_STORAG
 mkdir -p "${NUPLAN_EXP_ROOT}" "${RAY_TMPDIR_ROOT}" "${RAY_TMPDIR_ALIAS_ROOT}"
 
 if [ -d /dev/shm ]; then
-  SHM_AVAIL_BYTES="$(python - <<'PY'
+  SHM_AVAIL_BYTES="$("${PYTHON_BIN}" - <<'PY'
 import os
 st = os.statvfs("/dev/shm")
 print(st.f_bavail * st.f_frsize)
@@ -187,7 +172,7 @@ PY
 fi
 
 read -r TRAINSET_SIZE TRAIN_STEPS_PER_EPOCH <<EOF
-$(python - "${TRAINING_JSON}" "${TRAIN_BATCH_SIZE}" <<'PY'
+$("${PYTHON_BIN}" - "${TRAINING_JSON}" "${TRAIN_BATCH_SIZE}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -204,7 +189,7 @@ EOF
 TRAIN_SAMPLES_PER_EPOCH=$(( TRAIN_STEPS_PER_EPOCH * TRAIN_BATCH_SIZE ))
 
 pick_free_port() {
-  python - <<'PY'
+  "${PYTHON_BIN}" - <<'PY'
 import socket
 
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -234,7 +219,7 @@ stop_ray_if_requested() {
 }
 
 make_private_ray_tmpdir_pair() {
-  python - "${RAY_TMPDIR_ROOT}" "${RAY_TMPDIR_ALIAS_ROOT}" "$1" <<'PY'
+  "${PYTHON_BIN}" - "${RAY_TMPDIR_ROOT}" "${RAY_TMPDIR_ALIAS_ROOT}" "$1" <<'PY'
 from pathlib import Path
 import hashlib
 import sys
@@ -253,7 +238,7 @@ PY
 }
 
 assert_ray_socket_path_safe() {
-  python - "$1" <<'PY'
+  "${PYTHON_BIN}" - "$1" <<'PY'
 import sys
 
 base = sys.argv[1].rstrip("/")
@@ -299,7 +284,7 @@ delete_result_dir_if_requested() {
 }
 
 list_teacher_candidates_json() {
-  python - "${TEACHER_POOL_RUN_DIR}" "${TEACHER_CANDIDATE_MODE}" "${TEACHER_RECENT_K}" <<'PY'
+  "${PYTHON_BIN}" - "${TEACHER_POOL_RUN_DIR}" "${TEACHER_CANDIDATE_MODE}" "${TEACHER_RECENT_K}" <<'PY'
 from pathlib import Path
 import json
 import sys
@@ -354,7 +339,7 @@ persist_static_teacher_json() {
   local path="$1"
   local mode="$2"
   local teacher_ckpt="$3"
-  python - "${path}" "${mode}" "${teacher_ckpt}" "${TEACHER_POOL_RUN_DIR}" "${TEACHER_SELECT_SPLIT}" "${CHALLENGE}" <<'PY'
+  "${PYTHON_BIN}" - "${path}" "${mode}" "${teacher_ckpt}" "${TEACHER_POOL_RUN_DIR}" "${TEACHER_SELECT_SPLIT}" "${CHALLENGE}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -380,7 +365,7 @@ resolve_best_teacher_checkpoint() {
     return 0
   fi
   if [ -f "${cache_json}" ]; then
-    python - "${cache_json}" <<'PY'
+    "${PYTHON_BIN}" - "${cache_json}" <<'PY'
 import json
 import sys
 print(json.loads(open(sys.argv[1], "r", encoding="utf-8").read())["teacher_ckpt"])
@@ -390,7 +375,7 @@ PY
 
   local candidates_json
   candidates_json="$(list_teacher_candidates_json)"
-  python - \
+  "${PYTHON_BIN}" - \
     "${PROJECT_ROOT}" \
     "${NUPLAN_DEVKIT_ROOT}" \
     "${TEACHER_POOL_RUN_DIR}" \
@@ -445,7 +430,7 @@ resolve_random_teacher_checkpoint() {
     return 0
   fi
   if [ -f "${cache_json}" ]; then
-    python - "${cache_json}" <<'PY'
+    "${PYTHON_BIN}" - "${cache_json}" <<'PY'
 import json
 import sys
 print(json.loads(open(sys.argv[1], "r", encoding="utf-8").read())["teacher_ckpt"])
@@ -460,7 +445,7 @@ PY
     best_teacher="$(resolve_best_teacher_checkpoint)"
   fi
 
-  python - \
+  "${PYTHON_BIN}" - \
     "${cache_json}" \
     "${candidates_json}" \
     "${TEACHER_RANDOM_SEED}" \
@@ -622,7 +607,7 @@ write_variant_meta() {
   local meta_path="${SUITE_META_DIR}/${variant}.json"
   local rollouts_per_epoch=$(( TRAIN_SAMPLES_PER_EPOCH * rollout_multiplier ))
 
-  python - \
+  "${PYTHON_BIN}" - \
     "${meta_path}" \
     "${variant}" \
     "${run_dir}" \
@@ -687,7 +672,7 @@ PY
 }
 
 collect_ckpt_names() {
-  python - "$1" <<'PY'
+  "${PYTHON_BIN}" - "$1" <<'PY'
 from pathlib import Path
 import sys
 
@@ -753,7 +738,7 @@ train_variant() {
   fi
 
   local -a train_cmd=(
-    python -m torch.distributed.run
+    "${PYTHON_BIN}" -m torch.distributed.run
     --nnodes 1
     --nproc-per-node "${NPROC_PER_NODE}"
     --master_addr "${MASTER_ADDR}"
@@ -813,7 +798,7 @@ train_variant() {
 }
 
 append_eval_row() {
-  python - "$@" <<'PY'
+  "${PYTHON_BIN}" - "$@" <<'PY'
 import csv
 import json
 import re
@@ -935,10 +920,10 @@ run_single_benchmark_eval() {
     )
   fi
 
-  if RAY_TMPDIR="${ray_tmpdir_for_run}" PYTHONUNBUFFERED=1 python -u "${NUPLAN_DEVKIT_ROOT}/nuplan/planning/script/run_simulation.py" \
+  if RAY_TMPDIR="${ray_tmpdir_for_run}" PYTHONUNBUFFERED=1 "${PYTHON_BIN}" -u "${NUPLAN_DEVKIT_ROOT}/nuplan/planning/script/run_simulation.py" \
     "${SIM_ARGS[@]}" \
     2>&1 | tee "${log_file}"; then
-    if python "${PROJECT_ROOT}/flow_planner/onpolicy/benchmark_table.py" \
+    if "${PYTHON_BIN}" "${PROJECT_ROOT}/flow_planner/onpolicy/benchmark_table.py" \
       --report "${result_dir}" \
       --variant "${variant}" \
       --latency-mode "${LATENCY_MODE}" \
@@ -973,7 +958,7 @@ evaluate_variant_all_epochs() {
   fi
 
   : > "${jsonl_path}"
-  python - "${csv_path}" <<'PY'
+  "${PYTHON_BIN}" - "${csv_path}" <<'PY'
 import csv
 import sys
 
@@ -998,7 +983,10 @@ with open(sys.argv[1], "w", newline="", encoding="utf-8") as f:
     writer.writeheader()
 PY
 
-  mapfile -t ckpt_names < <(collect_ckpt_names "${run_dir}")
+  ckpt_names=()
+  while IFS= read -r ckpt_name; do
+    ckpt_names+=("${ckpt_name}")
+  done < <(collect_ckpt_names "${run_dir}")
   if [ "${#ckpt_names[@]}" -eq 0 ]; then
     echo "No checkpoints found for variant ${variant} under ${run_dir}"
     exit 1
@@ -1027,7 +1015,7 @@ persist_best_primary_selection() {
   local variant="$1"
   local jsonl_path="${SUITE_EVAL_DIR}/${PRIMARY_SPLIT}/${variant}/benchmark_per_epoch.jsonl"
   local out_json="${SUITE_EVAL_DIR}/${PRIMARY_SPLIT}/${variant}/best_checkpoint.json"
-  python - "${jsonl_path}" "${out_json}" "${variant}" "${PRIMARY_SPLIT}" <<'PY'
+  "${PYTHON_BIN}" - "${jsonl_path}" "${out_json}" "${variant}" "${PRIMARY_SPLIT}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -1062,7 +1050,7 @@ materialize_primary_report_from_best() {
 }
 
 write_selected_report() {
-  python - "$@" <<'PY'
+  "${PYTHON_BIN}" - "$@" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -1139,14 +1127,16 @@ for variant in "${selected_variants[@]}"; do
   if [ "${RUN_PRIMARY_EVAL}" = "true" ]; then
     evaluate_variant_all_epochs "${variant}"
   fi
-  selected_ckpt="$(persist_best_primary_selection "${variant}")"
+  if [ "${RUN_PRIMARY_EVAL}" = "true" ] || [ "${RUN_REPORT_EVAL}" = "true" ]; then
+    selected_ckpt="$(persist_best_primary_selection "${variant}")"
+  fi
   if [ "${RUN_REPORT_EVAL}" = "true" ]; then
     evaluate_variant_report_splits "${variant}" "${selected_ckpt}"
   fi
 done
 
 if [ "${RUN_SUMMARY}" = "true" ]; then
-  python "${PROJECT_ROOT}/flow_planner/onpolicy/grid_obj_ablation_collect.py" \
+  "${PYTHON_BIN}" "${PROJECT_ROOT}/flow_planner/onpolicy/grid_obj_ablation_collect.py" \
     --suite-root "${SUITE_ROOT}" \
     --output-dir "${SUITE_SUMMARY_DIR}" \
     --primary-split "${PRIMARY_SPLIT}" \

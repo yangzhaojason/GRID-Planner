@@ -1,142 +1,232 @@
-<div align="center">
-<h3>Flow Matching-Based Autonomous Driving Planning</br>
-with Advanced Interactive Behavior Modeling</h3>
+# GRID-Planner
 
-[Tianyi Tan](https://github.com/0ttwhy4)\*, [Yinan Zheng](https://github.com/ZhengYinan-AIR)\*, [Ruiming Liang](https://github.com/LRMbbj), [Zexu Wang](https://github.com/ZexuWang), [Kexin Zheng](https://air-dream.netlify.app/author/kexin-zheng/), [Jinliang Zheng](https://github.com/2toinf), [Jianxiong Li](https://facebear-ljx.github.io/), [Xianyuan Zhan](https://zhanzxy5.github.io/zhanxianyuan/), [Jingjing Liu](https://air.tsinghua.edu.cn/en/info/1046/1194.htm)
+**Graph-Structured Relational Reward Shaping for Diffusion Planning**
 
+Zhao Yang, Zezhong Qian, Yinan Shi, Longjun Liu, and Yawei Jueluo
 
-[**[Arxiv]**](https://arxiv.org/pdf/2510.11083)
+ACM Multimedia 2026 · [Paper DOI](https://doi.org/10.1145/3767308.3835263)
 
-*The 39th Annual Conference on Neural Information Processing Systems (NeurIPS), 2025*
+GRID-Planner studies how relational scene information can guide trajectory
+weighting, reward evaluation, and on-policy refinement for autonomous driving.
+This research implementation builds on **Flow Planner**, retaining the
+`flow_planner` Python namespace for compatibility with existing checkpoints
+and Hydra configurations.
 
-</div>
+The repository contains GA-IW, relational reward surrogates, configurable
+on-policy optimization, self-distillation, and nuPlan evaluation utilities.
+It also contains experimental variants that differ from some equations and
+settings in the paper. **Pretrained checkpoints, exact paper-run configurations,
+measured evaluation artifacts, and a complete interPlan reproduction workflow
+are not included.** Read [implementation and reproduction notes](docs/reproducibility.md)
+before comparing results with the paper.
 
-The official implementation of *Flow Planner*, an advanced learning-based framework melding coordinated innovations in **data modeling**, **architecture design**, and **learning schemes** to enhance interactive driving behavior modeling for autonomous driving planning.
+## Repository layout
 
-## Contents
+| Path | Purpose |
+| --- | --- |
+| `flow_planner/model/` | Flow Planner backbone and flow-matching trajectory generator |
+| `flow_planner/core/` | Graph-aware weighting and training objectives |
+| `flow_planner/reward/rrs.py` | Relational reward proxies |
+| `flow_planner/onpolicy/` | Distillation, checkpoint selection, evaluation reports, ablation analysis |
+| `flow_planner/script/` | Hydra training configurations |
+| `flow_planner/nuplan_simulation/` | Planner configuration and scenario filters |
+| `flow_planner/run_script/` | Training, simulation, and ablation launchers |
+| `configs/environment.example.sh` | Machine-specific path configuration template |
+| `data_process.py`, `data_process.sh` | nuPlan preprocessing and dataset indexing |
+| `tests/` | Lightweight packaging and command-line regression checks |
 
-- [Methods](#methods)
-- [Closed-loop Performance](#closed-loop-performance)
-    - [NuPlan](#nuplan)
-    - [InterPlan](#interplan)
-- [Qualitative Results](#qualitative-results)
-- [Getting Started](#getting-started)
+## Installation
 
-## Methods
+Training and simulation target a Linux machine with NVIDIA GPUs. The code and
+pinned PyTorch stack require a compatible CUDA installation. Use Python 3.10
+for the commands below; the complete training environment has not been
+validated as part of the repository cleanup.
 
-From the data modeling perspective, we propose **fine-grained trajectory tokenization** to achieve expressive trajectory modeling. Subsequently, we design a well-curated architecture that enhances interactive behavior modeling through thorough **spatiotemporal fusion**. Finally, we adopt flow matching with **classifier-free guidance** to further enhance multi-modal and interactive driving behaviors.
+```bash
+git clone https://github.com/yangzhaojason/GRID-Planner.git
+cd GRID-Planner
+conda create -n grid-planner python=3.10
+conda activate grid-planner
 
-<image src="assets/imgs/framework.png" width=100%>
-
-## Closed-loop Performance
-
-### NuPlan
-
-**1. Learning-based Methods**
-
-| Methods                            | Val14 (NR) | Val14 (R) | Test14-hard (NR) | Test14-hard (R) | Test14 (NR) | Test14 (R) |
-| ---------------------------------- | ---------- | ----------- | ---------------- | ----------------- | ----------- | ------------ |
-| PDM-Open*                          | 53.53      | 54.24       | 33.51            | 35.83             | 52.81       | 57.23        |
-| UrbanDriver                        | 68.57      | 64.11       | 50.40            | 49.95             | 51.83       | 67.15        |
-| GameFormer w/o refine.             | 13.32      | 8.69        | 7.08             | 6.69              | 11.36       | 9.31         |
-| PlanTF                             | 84.72      | 76.95       | 69.70            | 61.61             | 85.62       | 79.58        |
-| PLUTO w/o refine.*                 | 88.89      | 78.11       | 70.03            | 59.74             | **89.90**   | 78.62        |
-| Diffusion-es w/o LLM               | 50.00      | -           | -                | -                 | -           | -            |
-| STR2-CPKS-800M w/o refine.*        | 65.16      | -           | 52.57            | -                 | 68.74       | -            |
-| Diffusion Planner                  | 89.87  | 82.80   | 75.99  | 69.22  | 89.19  | **82.93**    |
-| **Flow Planner** (Ours)                | **90.43** | **83.31** | **76.47** | **70.42** | **89.88** | **82.93** |
-
----
-
-**2. Rule-based / Hybrid Methods**
-
-| Methods                              | Val14 (NR) | Val14 (R) | Test14-hard (NR) | Test14-hard (R) | Test14 (NR) | Test14 (R) |
-| ------------------------------------ | ---------- | ----------- | ---------------- | ----------------- | ----------- | ------------ |
-| **Expert (Log-replay)**              | 93.53      | 80.32       | 85.96        | 68.80             | 94.03       | 75.86        |
-| IDM                                  | 75.60      | 77.33       | 56.15            | 62.26             | 70.39       | 74.42        |
-| PDM-Closed                           | 92.84      | 92.12       | 65.08            | 75.19             | 90.05       | 91.63        |
-| PDM-Hybrid                           | 92.77      | 92.11       | 65.99            | 76.07             | 90.10       | 91.28        |
-| GameFormer                           | 79.94      | 79.78       | 68.70            | 67.05             | 83.88       | 82.05        |
-| PLUTO                                | 92.88      | 76.88       | 80.08            | 76.88             | 92.23       | 90.29        |
-| Diffusion-es                         | 92.00      | -           | -                | -                 | -           | -            |
-| STR2-CPKS-800M                       | 93.91      | 92.51       | 77.54            | 82.02         | -           | -            |
-| Diffusion Planner w/ refine   | 94.26  | 92.90   | 78.87            | 82.00         | 94.80   | 91.75    |
-| **Flow Planner** w/ refine (ours)   | 94.31  | 92.38   | 78.64            | 80.25       | 94.79   | 92.40    |
-
-### InterPlan
-
-| Methods                                 | Overall Score | Nudge Around | High Traffic Density | Jaywalk  |
-| --------------------------              | ----------    | ---------    | -------------------- |--------- |
-| PlanTF                                  | 47.70         | 49.40        | 58.85                | 33.94    |
-| PLUTO w/o refine.*                      | 58.47         | 71.56        | 67.25                | 25.48    |
-| Diffusion Planner                       | 52.90         | 60.48        | 49.71                | 26.20    |
-| **Flow Planner**                            | **61.82**         | 72.96        | 67.21                | 43.57    |
-
-*\*: prior knowledge is used for the model*
-
-## Qualitative Results
-
-<div align="center">
-
-  <img src="assets/imgs/cases_img/case8.png" width="100%">
-  <img src="assets/imgs/cases_img/case9.png" width="100%">
-  <img src="assets/imgs/cases_img/case17.png" width="100%">
-  <h7>nuPlan Scenarios</h7>
-  </br></br>
-
-  <!-- Group 2 -->
-  <img src="assets/imgs/cases_img/case5.png" width="100%">
-  <img src="assets/imgs/cases_img/case2.png" width="100%">
-  <h7>interPlan Scenarios</h7>
-
-</div>
-
-## Getting Started
-
-### Fundamental setup
-```
-conda create -n flow_planner python=3.9
-conda activate flow_planner
-```
-### install nuplan-devkit
-```
-git clone https://github.com/motional/nuplan-devkit.git && cd nuplan-devkit
-pip install -e .
-pip install -r requirements.txt
+# nuPlan is an external dependency, installed from its own source checkout.
+git clone https://github.com/motional/nuplan-devkit.git nuplan-devkit
+python -m pip install -r nuplan-devkit/requirements.txt
+python -m pip install -e ./nuplan-devkit
+python -m pip install -r requirements.txt
+python -m pip install -e . --no-deps
+python -m pip check
 ```
 
-### flow planner setup
+Choose the PyTorch/CUDA build appropriate to the machine while retaining the
+versions in `requirements.txt`. The repository does not yet pin a validated
+nuPlan commit or provide a fully locked environment. Record the devkit commit,
+CUDA version, and `pip freeze` with each experiment.
 
+Download nuPlan data and maps separately using the
+[nuPlan devkit instructions](https://github.com/motional/nuplan-devkit).
+Dataset files, maps, and trained weights are not distributed with this repository.
+
+## Configure paths
+
+From the repository root:
+
+```bash
+cp configs/environment.example.sh configs/environment.local.sh
+# Edit environment.local.sh for your data, maps, devkit, and output directories.
+source configs/environment.local.sh
 ```
-cd ..
-git clone https://github.com/DiffusionAD/Flow-Planner.git && cd Flow-Planner
-pip install -e .
-pip install -r requirements.txt
+
+Launchers infer the repository location and honor environment overrides. Shared
+defaults live in `flow_planner/run_script/common.sh`; local configuration and
+outputs are ignored by Git. Key variables are:
+
+| Variable | Meaning |
+| --- | --- |
+| `PROJECT_ROOT` | Repository root; inferred by launchers |
+| `NUPLAN_DEVKIT_ROOT` | Source checkout containing `nuplan/planning/script/run_simulation.py` |
+| `NUPLAN_DATA_ROOT`, `NUPLAN_MAPS_ROOT` | Dataset and map roots used by nuPlan |
+| `TRAINING_DATA`, `TRAINING_JSON` | Processed `.npz` directory and filename index |
+| `SAVE_DIR`, `NUPLAN_EXP_ROOT` | Training and simulation output roots |
+| `CUDA_VISIBLE_DEVICES`, `NPROC_PER_NODE` | GPU selection and number of training processes |
+| `PRETRAINED_CKPT` | Initial checkpoint for fine-tuning |
+| `RUN_DIR` | A training run containing checkpoints and `.hydra/config.yaml` |
+
+The research launchers retain their original eight-process training defaults.
+For a smaller machine, set both `CUDA_VISIBLE_DEVICES` and `NPROC_PER_NODE`,
+then adjust the batch size to fit available memory. This changes the experiment
+configuration and is not a verified paper reproduction recipe.
+
+## Prepare data
+
+```bash
+# NUPLAN_DATA_PATH must point to the raw trainval data directory.
+NUPLAN_DATA_PATH=/path/to/nuplan/trainval \
+NUPLAN_MAP_PATH=/path/to/nuplan/maps \
+TOTAL_SCENARIOS=1000000 \
+bash data_process.sh
 ```
 
-### To Launch Training
+The script writes processed `.npz` files to `TRAINING_DATA` and a sorted filename
+list to `TRAINING_JSON`. Use a separate processed-data directory for each split:
+the index includes every `.npz` file already present in that directory.
+`python data_process.py --help` lists the preprocessing options, including
+`--log_names`, `--output_json`, and `--shuffle_scenarios false`.
 
-1. Convert nuplan data into npz and generate corresponding data list json file as indicated in https://github.com/ZhengYinan-AIR/Diffusion-Planner.
-2. Fill in the `flow_planner.script.data.dataset.nuplan_data.yaml` with generated file path.
-3. Launch training with `flow_planner/run_script/launch_train.sh`
+Two existing manifests are retained for traceability:
 
-## Bibtex
+- `nuplan_train.json` contains 13,180 training log names and is the default
+  preprocessing filter.
+- `flow_planner_training.json` contains the existing one-million-sample index.
+  Set `TRAINING_JSON="$PROJECT_ROOT/flow_planner_training.json"` to use it only
+  when all corresponding processed files exist. Regenerating data is not
+  guaranteed to reproduce this exact sample set or order.
 
-If you find our code and paper can help, please cite our paper as:
+## Training and refinement
+
+```bash
+# Flow Planner baseline: GA-IW, RRS and RL are disabled by default.
+bash flow_planner/run_script/launch_train.sh
+
+# GA-IW fine-tuning from an existing compatible checkpoint.
+PRETRAINED_CKPT=/path/to/base/latest.pth \
+bash flow_planner/run_script/launch_train_graph_weighting_ft.sh
+
+# GA-IW + safety-only RRS preset (rule/comfort weights remain zero).
+PRETRAINED_CKPT=/path/to/base/latest.pth \
+bash flow_planner/run_script/launch_train_graph_weighting_rrs_ft.sh
+
+# Checkpoint evaluation and on-policy self-distillation cycles.
+RUN_DIR=/path/to/training/run \
+bash flow_planner/run_script/launch_onpolicy_opsd_cycle.sh
 ```
-@inproceedings{
-tan2025flow,
-title={Flow Matching-Based Autonomous Driving Planning with Advanced Interactive Behavior Modeling},
-author={Tianyi Tan and Yinan Zheng and Ruiming Liang and Zexu Wang and Kexin Zheng and Jinliang Zheng and Jianxiong Li and Xianyuan Zhan and Jingjing Liu},
-booktitle={The Thirty-ninth Annual Conference on Neural Information Processing Systems},
-year={2025}
+
+The cycle launcher selects a teacher checkpoint using nuPlan results, then
+runs distillation. Its default objective is GRPO with one teacher sample;
+GA-IW is disabled in the distillation configuration. These are research presets,
+not a single verified configuration for all reported paper results.
+
+Hydra overrides can be appended to training commands, for example
+`train.batch_size=32 train.epoch=1`. Preserve the generated `.hydra/config.yaml`
+alongside each checkpoint. Do not rename the internal `flow_planner` modules or
+configuration identifiers when loading existing checkpoints.
+
+## nuPlan evaluation
+
+Supply a compatible checkpoint and the configuration saved with that checkpoint:
+
+```bash
+CONFIG_FILE=/path/to/run/.hydra/config.yaml \
+CKPT_FILE=/path/to/run/latest.pth \
+SPLIT=val14 \
+CHALLENGE=closed_loop_nonreactive_agents \
+bash flow_planner/run_script/launch_sim_nuplan_base.sh
+
+# Evaluate checkpoints from a particular training run.
+RUN_DIR=/path/to/run \
+bash flow_planner/run_script/launch_sim_nuplan_all_epochs.sh
+
+python print_result.py /path/to/simulation/runner_report.parquet
+```
+
+Available filters are `val14`, `test14-hard`, and `test14-random`. Challenges are
+`closed_loop_nonreactive_agents` and `closed_loop_reactive_agents`. The result
+printer resolves `runner_report.parquet` to the associated aggregated metrics;
+it also accepts the weighted-average metrics parquet directly.
+Use `run_nuboard.ipynb` to visualize an evaluation after configuring its paths.
+
+The `launch_*_ablation_suite.sh` scripts and `onpolicy/*collect.py` utilities
+support further experiments. The mock stability-data generator is
+**illustration-only**, and its output must not be used as measured results.
+See [asset provenance](assets/README.md).
+
+## Lightweight checks
+
+```bash
+python -m unittest discover -s tests -v
+python -m compileall -q flow_planner data_process.py print_result.py
+bash -n data_process.sh
+for script in flow_planner/run_script/*.sh; do bash -n "$script"; done
+```
+
+These checks cover packaging, preprocessing CLI behavior, and launcher contracts.
+They do not validate GPU training, closed-loop driving performance, or paper
+metrics. The wheel tests require `setuptools` and `wheel` in the test environment.
+
+## Citation and attribution
+
+```bibtex
+@inproceedings{yang2026gridplanner,
+  title = {GRID-Planner: Graph-Structured Relational Reward Shaping for Diffusion Planning},
+  author = {Yang, Zhao and Qian, Zezhong and Shi, Yinan and Liu, Longjun and Jueluo, Yawei},
+  booktitle = {Proceedings of the 34th ACM International Conference on Multimedia},
+  year = {2026},
+  doi = {10.1145/3767308.3835263},
+  publisher = {Association for Computing Machinery}
+}
+```
+
+This repository builds on [Flow Planner](https://github.com/DiffusionAD/Flow-Planner)
+and uses preprocessing and planning foundations from
+[Diffusion Planner](https://github.com/ZhengYinan-AIR/Diffusion-Planner)
+and [nuPlan](https://github.com/motional/nuplan-devkit). Please also credit the
+upstream work when using those components:
+
+```bibtex
+@inproceedings{tan2025flow,
+  title = {Flow Matching-Based Autonomous Driving Planning with Advanced Interactive Behavior Modeling},
+  author = {Tianyi Tan and Yinan Zheng and Ruiming Liang and Zexu Wang and Kexin Zheng and Jinliang Zheng and Jianxiong Li and Xianyuan Zhan and Jingjing Liu},
+  booktitle = {The Thirty-ninth Annual Conference on Neural Information Processing Systems},
+  year = {2025}
 }
 
-@inproceedings{
-zheng2025diffusionbased,
-title={Diffusion-Based Planning for Autonomous Driving with Flexible Guidance},
-author={Yinan Zheng and Ruiming Liang and Kexin ZHENG and Jinliang Zheng and Liyuan Mao and Jianxiong Li and Weihao Gu and Rui Ai and Shengbo Eben Li and Xianyuan Zhan and Jingjing Liu},
-booktitle={The Thirteenth International Conference on Learning Representations},
-year={2025}
+@inproceedings{zheng2025diffusionbased,
+  title = {Diffusion-Based Planning for Autonomous Driving with Flexible Guidance},
+  author = {Yinan Zheng and Ruiming Liang and Kexin Zheng and Jinliang Zheng and Liyuan Mao and Jianxiong Li and Weihao Gu and Rui Ai and Shengbo Eben Li and Xianyuan Zhan and Jingjing Liu},
+  booktitle = {The Thirteenth International Conference on Learning Representations},
+  year = {2025}
 }
 ```
+
+Code is distributed under the existing [MIT license](LICENSE), including the
+upstream copyright notice. External datasets and dependencies retain their own
+licenses; the paper's publication license is separate from the code license.
