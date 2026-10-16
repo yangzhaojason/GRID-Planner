@@ -117,6 +117,18 @@ def run_nuplan_simulation(
     if env:
         merged_env.update(env)
 
+    exp_root = merged_env.get("NUPLAN_EXP_ROOT")
+    if not exp_root:
+        raise ValueError(
+            "NUPLAN_EXP_ROOT is required to locate simulation reports. "
+            "Set it in the environment or pass env={'NUPLAN_EXP_ROOT': '/path/to/results'}."
+        )
+    exp_root_path = Path(exp_root)
+    if not exp_root_path.is_absolute():
+        exp_root_path = Path(paths.project_root).resolve() / exp_root_path
+    merged_env["NUPLAN_EXP_ROOT"] = str(exp_root_path)
+    output_dir = str(exp_root_path / "exp" / "simulation" / sim_cfg.challenge / exp_uid)
+
     # Create the directory actually passed to Ray, including caller overrides.
     os.makedirs(merged_env["RAY_TMPDIR"], exist_ok=True)
 
@@ -128,10 +140,5 @@ def run_nuplan_simulation(
         text=True,
         check=False,
     )
-
-    exp_root = merged_env.get("NUPLAN_EXP_ROOT", None)
-    output_dir = None
-    if exp_root:
-        output_dir = str(Path(exp_root) / "exp" / "simulation" / sim_cfg.challenge / exp_uid)
 
     return NuPlanSimRunResult(proc=proc, experiment_uid=exp_uid, output_dir=output_dir)

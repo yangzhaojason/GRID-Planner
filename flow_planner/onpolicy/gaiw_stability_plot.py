@@ -75,15 +75,24 @@ def _ratio_points(
     numerator_points: List[Dict[str, Any]],
     denominator_points: List[Dict[str, Any]],
     eps: float = 1e-12,
-) -> List[Dict[str, float]]:
+) -> List[Dict[str, Any]]:
     numerator = {int(p["epoch"]): float(p["value"]) for p in numerator_points}
     denominator = {int(p["epoch"]): float(p["value"]) for p in denominator_points}
-    out: List[Dict[str, float]] = []
+    sources: Dict[int, List[str]] = {}
+    for point in numerator_points + denominator_points:
+        source = point.get("suite_root")
+        if source:
+            sources.setdefault(int(point["epoch"]), []).append(str(source))
+    out: List[Dict[str, Any]] = []
     for epoch in sorted(set(numerator) & set(denominator)):
         denom = denominator[epoch]
         if abs(denom) <= eps:
             continue
-        out.append({"epoch": epoch, "value": float(numerator[epoch] / denom)})
+        point = {"epoch": epoch, "value": float(numerator[epoch] / denom)}
+        roots = sorted(set(sources.get(epoch, [])))
+        if roots:
+            point["suite_root"] = roots[0] if len(roots) == 1 else "mixed://" + "|".join(roots)
+        out.append(point)
     return out
 
 
@@ -116,7 +125,18 @@ def _load_scalar_series(tb_dir: Path, tag: str) -> Tuple[List[int], List[float]]
     return [int(e.step) for e in events], [float(e.value) for e in events]
 
 
+def _contains_synthetic(value: Any) -> bool:
+    if isinstance(value, str):
+        return "mock://" in value
+    if isinstance(value, dict):
+        return bool(value.get("synthetic")) or any(_contains_synthetic(v) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_synthetic(v) for v in value)
+    return False
+
+
 def _complete_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    payload["synthetic"] = _contains_synthetic(payload)
     variants = payload.setdefault("variants", {})
     for variant in STABILITY_VARIANTS:
         body = variants.setdefault(
@@ -132,6 +152,8 @@ def _complete_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         body.setdefault("label", VARIANT_LABELS.get(variant, variant))
         body.setdefault("color", VARIANT_COLORS.get(variant, "#444444"))
         body.setdefault("eval", {})
+        if "collision_score_loss" not in body["eval"] and "coll_down" in body["eval"]:
+            body["eval"]["collision_score_loss"] = body["eval"].pop("coll_down")
         body.setdefault("weights", {})
         body.setdefault("derived", {})
         for section in ("eval", "weights", "derived"):
@@ -149,7 +171,7 @@ def _extract_payload_from_suite(suite_root: Path) -> Dict[str, Any]:
     for variant in STABILITY_VARIANTS:
         tb_dir = suite_root / "runs" / variant / "tensorboard"
         score_points = _series_points(*_eval_series(suite_root, variant, "score_up"))
-        coll_points = _series_points(*_eval_series(suite_root, variant, "coll_down"))
+        coll_points = _series_points(*_eval_series(suite_root, variant, "collision_score_loss"))
         p50_points = _series_points(*_load_scalar_series(tb_dir, WEIGHT_TAGS["p50"]))
         p90_points = _series_points(*_load_scalar_series(tb_dir, WEIGHT_TAGS["p90"]))
         p99_points = _series_points(*_load_scalar_series(tb_dir, WEIGHT_TAGS["p99"]))
@@ -158,7 +180,7 @@ def _extract_payload_from_suite(suite_root: Path) -> Dict[str, Any]:
             "color": VARIANT_COLORS[variant],
             "eval": {
                 "score_up": score_points,
-                "coll_down": coll_points,
+                "collision_score_loss": coll_points,
             },
             "weights": {
                 "gaiw_p50": p50_points,
@@ -211,7 +233,7 @@ def _payload_from_csv(path: Path) -> Dict[str, Any]:
         )
         body.setdefault(section, {})
         body[section].setdefault(metric, [])
-        body[section][metric].append({"epoch": epoch, "value": value})
+        body[section][metric].append({"epoch": epoch, "value": value, "suite_root": row.get("suite_root", "")})
     return _complete_payload(payload)
 
 
@@ -232,7 +254,7 @@ def _flatten_payload_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
                         continue
                     rows.append(
                         {
-                            "suite_root": suite_root,
+                            "suite_root": point.get("suite_root", suite_root),
                             "variant": variant,
                             "label": body.get("label", VARIANT_LABELS.get(variant, variant)),
                             "color": body.get("color", VARIANT_COLORS.get(variant, "#333333")),
@@ -349,7 +371,7 @@ def _normalized_gap_points(payload: Dict[str, Any], section: str, metric: str, h
 
 def _plot_collision_panel(ax, payload: Dict[str, Any]) -> None:
     for variant in STABILITY_VARIANTS:
-        xs, ys = _points_to_xy(_variant_points(payload, variant, "eval", "coll_down"))
+        xs, ys = _points_to_xy(_variant_points(payload, variant, "eval", "collision_score_loss"))
         if xs:
             ax.plot(
                 xs,
@@ -360,9 +382,9 @@ def _plot_collision_panel(ax, payload: Dict[str, Any]) -> None:
                 color=_variant_color(payload, variant),
                 label=_variant_label(payload, variant),
             )
-    ax.set_title("Collision Rate vs. Epoch")
+    ax.set_title("Collision Score Loss vs. Epoch")
     ax.set_xlabel("Epoch")
-    ax.set_ylabel("Collision rate")
+    ax.set_ylabel("Collision score loss")
     _style_axes(ax)
     _annotate_if_empty(ax, "No collision data found")
     handles, labels = ax.get_legend_handles_labels()
@@ -424,7 +446,7 @@ def _plot_quantiles_panel(ax, payload: Dict[str, Any], line2d_cls: Any) -> None:
 
 
 def _plot_showcase_gap_panel(ax, payload: Dict[str, Any]) -> None:
-    gap_map = _normalized_gap_points(payload, "eval", "coll_down", higher_is_better=False)
+    gap_map = _normalized_gap_points(payload, "eval", "collision_score_loss", higher_is_better=False)
     for variant in STABILITY_VARIANTS:
         xs, ys = _points_to_xy(gap_map.get(variant, []))
         _plot_raw_and_smoothed(
@@ -437,7 +459,7 @@ def _plot_showcase_gap_panel(ax, payload: Dict[str, Any]) -> None:
         )
     ax.set_title("Safety Gap During Training")
     ax.set_xlabel("Training Epoch")
-    ax.set_ylabel("Normalized collision gap\n(0 = best, 1 = worst)")
+    ax.set_ylabel("Normalized collision-score gap\n(0 = best, 1 = worst)")
     ax.set_ylim(bottom=0.0)
     _style_axes(ax)
     _annotate_if_empty(ax, "No gap data found")
@@ -515,13 +537,15 @@ def _render_figure(
         fig.text(
             0.5,
             0.02,
-            footer_note or "Solid lines show EMA-smoothed trends; faint lines show raw epoch-level measurements.",
+            "Synthetic illustration; curves are not measured results." if _contains_synthetic(payload) else (footer_note or "Solid lines show EMA-smoothed trends; faint lines show raw epoch-level measurements."),
             ha="center",
             fontsize=10,
             color="#555555",
         )
         fig.tight_layout(rect=(0.0, 0.04, 1.0, 0.95))
 
+    if _contains_synthetic(payload):
+        fig.text(0.5, 0.005, "SYNTHETIC ILLUSTRATION — NOT MEASURED RESULTS", ha="center", va="bottom", color="#A00000", fontsize=11, fontweight="bold", bbox={"facecolor": "white", "edgecolor": "#A00000"})
     fig.savefig(output_png, dpi=dpi, bbox_inches="tight")
     fig.savefig(output_svg, bbox_inches="tight")
 

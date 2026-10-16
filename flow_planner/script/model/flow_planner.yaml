@@ -1,4 +1,5 @@
 _target_: flow_planner.model.flow_planner_model.flow_planner.FlowPlanner
+device: ${device}
 
 neighbor_num: 32
 neighbor_pred_num: 0

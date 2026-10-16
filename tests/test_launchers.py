@@ -44,7 +44,7 @@ class LauncherTests(unittest.TestCase):
             (self.work / directory).mkdir(parents=True, exist_ok=True)
         (self.work / "processed" / "flow_planner_training.json").write_text("[]")
         self.env = os.environ.copy()
-        for key in ("PROJECT_ROOT", "RUN_DIR", "RUN_TIMESTAMP", "CKPT_PATH", "CKPT_FILE", "CONFIG_FILE", "EXP_SAVE_ROOT"):
+        for key in ("PROJECT_ROOT", "RUN_DIR", "RUN_TIMESTAMP", "CKPT_PATH", "CKPT_FILE", "CONFIG_FILE", "EXP_SAVE_ROOT", "NUPLAN_EXP_ROOT"):
             self.env.pop(key, None)
         self.env.update(
             PATH=f"{self.work}{os.pathsep}{os.environ.get('PATH', '')}",
@@ -186,7 +186,7 @@ class LauncherTests(unittest.TestCase):
             paths=NuPlanSimPaths(project_root=str(ROOT), nuplan_devkit_root=str(self.work / "devkit")),
             run_dir=str(self.run_dir), ckpt_path=str(self.run_dir / "latest.pth"),
             sim_cfg=NuPlanSimConfig(ray_tmpdir=str(cfg_temp)),
-            env={"RAY_TMPDIR": str(selected_temp), "PATH": ""},
+            env={"RAY_TMPDIR": str(selected_temp), "NUPLAN_EXP_ROOT": str(self.work / "results"), "PATH": ""},
         )
         self.assertEqual(result.proc.returncode, 0, result.proc.stderr)
         self.assertEqual(result.proc.stdout.splitlines(), [sys.executable, str(selected_temp)])

@@ -54,14 +54,8 @@ def build_parser():
     parser.add_argument('--total_scenarios', type=int, default=10, help='limit total number of scenarios')
     parser.add_argument('--shuffle_scenarios', type=parse_bool, default=True, help='shuffle scenarios')
 
-    parser.add_argument('--agent_num', type=int, help='number of agents', default=32)
-    parser.add_argument('--static_objects_num', type=int, help='number of static objects', default=5)
 
-    parser.add_argument('--lane_len', type=int, help='number of lane point', default=20)
-    parser.add_argument('--lane_num', type=int, help='number of lanes', default=70)
 
-    parser.add_argument('--route_len', type=int, help='number of route lane point', default=20)
-    parser.add_argument('--route_num', type=int, help='number of route lanes', default=25)
     parser.add_argument('--log_names', default=str(Path(__file__).resolve().with_name('nuplan_train.json')),
                         help='JSON list of training log names')
     parser.add_argument('--output_json', default=None,
@@ -103,7 +97,7 @@ def main():
 
     # process data
     del worker, builder, scenario_filter
-    processor = DataProcessor(args)
+    processor = DataProcessor(args.save_path)
     processor.work(scenarios)
 
     count = write_data_list(args.save_path, output_json)

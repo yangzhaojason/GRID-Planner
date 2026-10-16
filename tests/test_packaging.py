@@ -24,7 +24,7 @@ class PackagingTest(unittest.TestCase):
         cls.root = Path(cls.temporary.name)
         source = cls.root / "source"
         source.mkdir()
-        for name in ("setup.py", "pyproject.toml", "MANIFEST.in", "requirements.txt", "README.md", "LICENSE"):
+        for name in ("setup.py", "pyproject.toml", "MANIFEST.in", "requirements.txt", "requirements-nuplan.txt", "README.md", "LICENSE"):
             if (ROOT / name).is_file():
                 shutil.copy2(ROOT / name, source / name)
         shutil.copytree(

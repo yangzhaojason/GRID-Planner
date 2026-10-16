@@ -7,6 +7,8 @@ scipy==1.13.1
 torch==2.3.0
 torchvision==0.18.0
 tensorboard==2.11.2
+# TensorBoard 2.11 imports pkg_resources, removed in setuptools 82.
+setuptools>=68,<82
 timm==1.0.10
 wandb==0.17.4
 

@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from functools import partial
+from dataclasses import replace
 from flow_planner.model.model_base import DiffusionADPlanner
 from flow_planner.model.model_utils.input_preprocess import ModelInputProcessor
 from flow_planner.model.model_utils.traj_tool import traj_chunking, assemble_actions
@@ -57,14 +58,16 @@ class FlowPlanner(DiffusionADPlanner):
         B = data.ego_current.shape[0]
 
         if is_training:
-            # modify the data sample according to cfg_flags
+            # Conditioning dropout must not remove agents/map data later used by RRS.
+            # Replace only masked fields on a shallow dataclass copy.
+            data = replace(data)
             cfg_type = self.cfg_type
             if cfg_type == 'neighbors':
                 neighbor_num = self.planner_params['neighbor_num']
                 cfg_neighbor_num = min(self.planner_params['cfg_neighbor_num'], neighbor_num)
                 mask_flags = cfg_flags.view(B, *([1] * (data.neighbor_past.dim()-1))).repeat(1, neighbor_num, 1, 1)
                 mask_flags[:, cfg_neighbor_num:, :] = 1
-                data.neighbor_past *= mask_flags
+                data.neighbor_past = data.neighbor_past * mask_flags
             elif cfg_type == 'lanes':
                 data.lanes = data.lanes * cfg_flags.view(B, *([1] * (data.lanes.dim()-1)))
 
@@ -163,27 +166,30 @@ class FlowPlanner(DiffusionADPlanner):
 
         # Assemble predicted tokens to full-horizon trajectory (B, 1, future_len, state_dim)
         # and denormalize to metric space for reward/cost computations in core.
-        try:
-            pred_full = assemble_actions(
-                prediction,
-                self.planner_params['future_len'],
-                self.planner_params['action_len'],
-                self.planner_params['action_overlap'],
-                self.planner_params['state_dim'],
-                self.assemble_method,
-            )  # (B, 1, T, D)
-            pred_full = self.data_processor.state_postprocess(pred_full)  # inverse state normalization
-            # drop the plan dimension for convenience: (B, T, D)
-            loss_dict["pred_future_denorm"] = pred_full[:, 0]
-        except Exception:
-            # Keep training robust if anything unexpected happens
-            pass
+        # Assembly/normalization failures must abort the step: dropping this key
+        # would silently remove configured RRS and distillation objective terms.
+        pred_full = assemble_actions(
+            prediction,
+            self.planner_params['future_len'],
+            self.planner_params['action_len'],
+            self.planner_params['action_overlap'],
+            self.planner_params['state_dim'],
+            self.assemble_method,
+        )  # (B, 1, T, D)
+        pred_full = self.data_processor.state_postprocess(pred_full)  # inverse state normalization
+        # drop the plan dimension for convenience: (B, T, D)
+        loss_dict["pred_future_denorm"] = pred_full[:, 0]
 
-        if self.planner_params['action_overlap'] > 0:
-            consistency_loss = [torch.mean(torch.sum(self.basic_loss(prediction[:, i:i+1, -self.planner_params['action_overlap']:, :], prediction[:, i+1:i+2, :self.planner_params['action_overlap'], :]), dim=-1)) for i in range(0, prediction.shape[1]-2)]
-            loss_dict['consistency_loss'] = sum(consistency_loss) / len(consistency_loss)
+        overlap = self.planner_params['action_overlap']
+        if overlap > 0 and prediction.shape[1] > 1:
+            # Each adjacent pair predicts the same overlap, including the final pair.
+            overlap_error = self.basic_loss(
+                prediction[:, :-1, -overlap:, :],
+                prediction[:, 1:, :overlap, :],
+            )
+            loss_dict['consistency_loss'] = overlap_error.sum(dim=-1).mean()
         else:
-            loss_dict['consistency_loss'] = torch.tensor(0.0, device=loss.device)
+            loss_dict['consistency_loss'] = loss.new_zeros(())
         
         assert not torch.isnan(loss).sum(), f"loss is NaN"
         
@@ -192,7 +198,8 @@ class FlowPlanner(DiffusionADPlanner):
     def forward_inference(self, data: NuPlanDataSample, use_cfg=True, cfg_weight=None):
         B = data.ego_current.shape[0]
         if use_cfg:
-            cfg_flags = torch.cat([torch.ones((B,), device=self.device), torch.zeros((B,), device=self.device)], dim=0).to(torch.int32)
+            # NuPlanDataSample.repeat interleaves copies of each scene.
+            cfg_flags = torch.tensor([1, 0], device=self.device, dtype=torch.int32).repeat(B)
         else:
             cfg_flags = torch.ones((B,), device=self.device).to(torch.int32)
         

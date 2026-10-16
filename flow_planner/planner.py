@@ -22,6 +22,7 @@ from nuplan.planning.simulation.planner.abstract_planner import (
 
 from flow_planner.data.data_process.data_processor import DataProcessor
 from flow_planner.data.dataset.nuplan import NuPlanDataSample
+from flow_planner.train_utils.save_model import load_model, load_model_weights
 
 def identity(ego_state, predictions):
     return predictions
@@ -50,6 +51,9 @@ class FlowPlanner(AbstractPlanner):
         self._step_interval = future_trajectory_sampling.time_horizon / future_trajectory_sampling.num_poses # [s]
         
         config = omegaconf.OmegaConf.load(config_path)
+        config.device = device
+        config.model.device = device
+        config.core.device = device
         self._config = config
         self._ckpt_path = ckpt_path
 
@@ -89,16 +93,7 @@ class FlowPlanner(AbstractPlanner):
         self._route_roadblock_ids = initialization.route_roadblock_ids
 
         if self._ckpt_path is not None:
-            state_dict = torch.load(self._ckpt_path, weights_only=True, map_location=self._device)
-            
-            if self._ema_enabled:
-                state_dict = state_dict['ema_state_dict']
-            else:
-                if "model" in state_dict.keys():
-                    state_dict = state_dict['model']
-            # use for ddp
-            model_state_dict = {k[len("module."):]: v for k, v in state_dict.items() if k.startswith("module.")}
-            self._planner.load_state_dict(model_state_dict)
+            load_model_weights(self._planner, load_model(self._ckpt_path), use_ema=self._ema_enabled)
         else:
             print("load random model")
         
@@ -149,4 +144,3 @@ class FlowPlanner(AbstractPlanner):
         )
 
         return trajectory
-    

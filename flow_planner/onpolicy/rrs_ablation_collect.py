@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -43,7 +44,13 @@ def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
 
 
 def _best_row(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    valid = [r for r in rows if r.get("status") == "OK" and r.get("score_up") is not None]
+    valid = []
+    for row in rows:
+        try:
+            if row.get("status") == "OK" and math.isfinite(float(row.get("score_up"))):
+                valid.append(row)
+        except (TypeError, ValueError):
+            continue
     if not valid:
         return None
     return max(valid, key=lambda r: float(r["score_up"]))
@@ -89,12 +96,13 @@ def _write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
         "epoch",
         "status",
         "score_up",
-        "coll_down",
+        "collision_score_loss",
         "red_light_down",
-        "lane_dev_down",
-        "jerk_down",
+        "driving_compliance_loss",
+        "comfort_failure_rate",
         "latency_down_ms",
         "result_dir",
+        "source",
         "report_path",
         "json_path",
     ]
@@ -107,7 +115,9 @@ def _write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
 
 def _write_markdown(path: Path, rows: List[Dict[str, Any]]) -> None:
     lines = [
-        "| Variant | Score | Coll. | Red-light | Lane dev. | Jerk | Latency (ms) | Best ckpt |",
+        "Metric definitions: collision score loss = 1 - at-fault collision score; driving compliance loss = 1 - mean(drivable-area, driving-direction scores); comfort failure rate = 1 - comfort pass rate. These are not physical lane deviation, jerk, or collision event rate.",
+        "",
+        "| Variant | Score | Collision score loss | Red-light | Driving compliance loss | Comfort failure rate | Latency (ms) | Best ckpt |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for row in rows:
@@ -117,13 +127,13 @@ def _write_markdown(path: Path, rows: List[Dict[str, Any]]) -> None:
             + " | "
             + _fmt(row.get("score_up"))
             + " | "
-            + _fmt(row.get("coll_down"))
+            + _fmt(row.get("collision_score_loss"))
             + " | "
             + _fmt(row.get("red_light_down"))
             + " | "
-            + _fmt(row.get("lane_dev_down"))
+            + _fmt(row.get("driving_compliance_loss"))
             + " | "
-            + _fmt(row.get("jerk_down"))
+            + _fmt(row.get("comfort_failure_rate"))
             + " | "
             + _fmt(row.get("latency_down_ms"), ndigits=3)
             + " | "
@@ -134,15 +144,15 @@ def _write_markdown(path: Path, rows: List[Dict[str, Any]]) -> None:
 
 
 def _write_latex_rows(path: Path, rows: List[Dict[str, Any]]) -> None:
-    lines: List[str] = []
+    lines: List[str] = ["% Collision/driving: dimensionless nuPlan metric-score losses. Comfort: any-bound failure fraction, not physical jerk."]
     for row in rows:
         lines.append(
             f"{row['variant_label']} & "
             f"{_fmt(row.get('score_up'), missing='xxx')} & "
-            f"{_fmt(row.get('coll_down'), missing='xxx')} & "
+            f"{_fmt(row.get('collision_score_loss'), missing='xxx')} & "
             f"{_fmt(row.get('red_light_down'), missing='xxx')} & "
-            f"{_fmt(row.get('lane_dev_down'), missing='xxx')} & "
-            f"{_fmt(row.get('jerk_down'), missing='xxx')} & "
+            f"{_fmt(row.get('driving_compliance_loss'), missing='xxx')} & "
+            f"{_fmt(row.get('comfort_failure_rate'), missing='xxx')} & "
             f"{_fmt(row.get('latency_down_ms'), ndigits=3, missing='xxx')} \\\\"
         )
         if row["variant_id"] in LATEX_GROUP_BREAK_AFTER:
@@ -156,10 +166,10 @@ def _write_latex_table(path: Path, rows: List[Dict[str, Any]]) -> None:
         body_lines.append(
             f"{row['variant_label']} & "
             f"{_fmt(row.get('score_up'), missing='xxx')} & "
-            f"{_fmt(row.get('coll_down'), missing='xxx')} & "
+            f"{_fmt(row.get('collision_score_loss'), missing='xxx')} & "
             f"{_fmt(row.get('red_light_down'), missing='xxx')} & "
-            f"{_fmt(row.get('lane_dev_down'), missing='xxx')} & "
-            f"{_fmt(row.get('jerk_down'), missing='xxx')} & "
+            f"{_fmt(row.get('driving_compliance_loss'), missing='xxx')} & "
+            f"{_fmt(row.get('comfort_failure_rate'), missing='xxx')} & "
             f"{_fmt(row.get('latency_down_ms'), ndigits=3, missing='xxx')} \\\\"
         )
         if row["variant_id"] in LATEX_GROUP_BREAK_AFTER:
@@ -168,12 +178,12 @@ def _write_latex_table(path: Path, rows: List[Dict[str, Any]]) -> None:
     lines = [
         "\\begin{table*}[t]",
         "\\centering",
-        "\\caption{\\textbf{RRS ablation.} Removing individual components of $\\mathcal R_{\\mathrm{RRS}}(\\tau)$ reveals their targeted impact on safety, rule compliance, and comfort. Score ($\\uparrow$; nuPlan Val14 Benchmark), safety/rule violations ($\\downarrow$), comfort (jerk, $\\downarrow$), and planning latency ($\\downarrow$) are reported. All variants use the same planner and training budget; only the reward surrogate is modified.}",
+        "\\caption{\\textbf{RRS ablation.} Removing individual components of $\\mathcal R_{\\mathrm{RRS}}(\\tau)$ reveals their targeted impact on safety, rule compliance, and comfort. Score ($\\uparrow$; nuPlan Val14 Benchmark), collision and driving metric-score losses ($\\downarrow$), comfort failure rate ( $\\downarrow$), and planning latency ($\\downarrow$) are reported. Collision and driving values are dimensionless score losses; comfort is the fraction failing any acceleration, jerk, or yaw bound. These are not collision event rates or physical lane deviation/jerk.}",
         "\\small",
         "\\setlength{\\tabcolsep}{5pt}",
         "\\begin{tabular}{lcccccc}",
         "\\toprule",
-        "\\textbf{Variant} & \\textbf{Score} $\\uparrow$ & \\textbf{Coll.} $\\downarrow$ & \\textbf{Red-light} $\\downarrow$ & \\textbf{Lane dev.} $\\downarrow$ & \\textbf{Jerk} $\\downarrow$ & \\textbf{Latency} $\\downarrow$ \\\\",
+        "\\textbf{Variant} & \\textbf{Score} $\\uparrow$ & \\textbf{Collision score loss} $\\downarrow$ & \\textbf{Red-light} $\\downarrow$ & \\textbf{Driving compliance loss} $\\downarrow$ & \\textbf{Comfort failure rate} $\\downarrow$ & \\textbf{Latency} $\\downarrow$ \\\\",
         "\\midrule",
         "\\midrule",
         *body_lines,

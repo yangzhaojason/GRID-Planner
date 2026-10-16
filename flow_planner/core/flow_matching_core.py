@@ -263,8 +263,11 @@ class FlowMatchingCore(Core):
         if not self.rl_cfg.get("enabled", False):
             return total_loss
 
-        if "rrs_reward_per_sample" not in loss_dict or "rrs_penalty_per_sample" not in loss_dict:
-            return total_loss
+        if loss_dict.get("rrs_reward_per_sample") is None or loss_dict.get("rrs_penalty_per_sample") is None:
+            raise RuntimeError(
+                "On-policy RL is enabled but RRS rewards are unavailable. "
+                "Set core.rrs.enabled=true and provide loss_dict['pred_future_denorm']."
+            )
 
         rl_algorithm = self._rl_algorithm
         reward_source = str(self.rl_cfg.get("reward_source", "rollout")).lower()
@@ -483,7 +486,7 @@ class FlowMatchingCore(Core):
         return {"value_net": vnet.state_dict()}
 
     def load_aux_state_dict(self, aux: dict):
-        """Restore auxiliary state (best-effort)."""
+        """Restore available auxiliary state with strict parameter validation."""
         if not aux or self.value_net is None:
             return
         sd = aux.get("value_net", None)
@@ -494,7 +497,7 @@ class FlowMatchingCore(Core):
             vnet = get_model(self.value_net)
         except Exception:
             vnet = self.value_net
-        vnet.load_state_dict(sd, strict=False)
+        vnet.load_state_dict(sd, strict=True)
     
     def set_epoch(self, epoch: int):
         """Optional hook for trainer to set current epoch (used for warm-up schedules)."""
@@ -608,11 +611,11 @@ class FlowMatchingCore(Core):
                 try:
                     ego_f = data.ego_future[..., :2].to(device)  # (B, T, 2)
                     nei_f = data.neighbor_future_observed[..., :2].to(device)  # (B, N, T, 2)
-                    # valid neighbor future if any position is non-zero
-                    nei_valid = (nei_f.abs().sum(dim=-1) > 1e-3).any(dim=-1)  # (B, N)
+                    # Zero padding marks missing observations at individual future steps.
+                    nei_valid = nei_f.abs().sum(dim=-1) > 1e-3  # (B, N, T)
                     rel = nei_f - ego_f[:, None, :, :]  # (B, N, T, 2)
                     dist = torch.norm(rel, dim=-1)  # (B, N, T)
-                    dist = dist + (~nei_valid)[:, :, None].to(dist.dtype) * 1e6
+                    dist = dist + (~nei_valid).to(dist.dtype) * 1e6
                     min_dist = dist.view(B, -1).amin(dim=-1)  # (B,)
                     coll_from_future = torch.clamp((collision_radius - min_dist) / collision_radius, min=0.0, max=1.0)
                 except Exception:
@@ -690,7 +693,12 @@ class FlowMatchingCore(Core):
             nu = nu_base
         need_rrs_for_rl = bool(self.rl_cfg.get("enabled", False))
         need_rrs_for_loss = (nu != 0.0)
-        if self.rrs_module is not None and (need_rrs_for_loss or need_rrs_for_rl) and "pred_future_denorm" in loss_dict:
+        if self.rrs_module is not None and (need_rrs_for_loss or need_rrs_for_rl):
+            if loss_dict.get("pred_future_denorm") is None:
+                raise RuntimeError(
+                    "Configured RRS/RL training requires model forward_train to return "
+                    "loss_dict['pred_future_denorm']; refusing to omit the reward term."
+                )
             # pred_future_denorm: (B, T, 4) = (x, y, cos, sin) in meters
             pred_future = loss_dict["pred_future_denorm"]
             rrs_penalty_per_sample, comps = self.rrs_module(pred_future, data)

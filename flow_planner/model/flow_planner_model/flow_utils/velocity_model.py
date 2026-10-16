@@ -30,14 +30,15 @@ class VelocityModel(nn.Module):
         t = t.unsqueeze(0).to(x.device)
         
         if self.use_cfg:
-            x = x.repeat(2, *[1] * (x.dim()-1))
+            # Match the interleaved conditioned/unconditioned scene pairs.
+            x = x.repeat_interleave(2, dim=0)
         
         pred = self.model_fn(x, t, **model_extras)
         if self.correct_xt_fn is not None:
             pred = self.correct_xt_fn(pred)
         u = self.pred_transform_func(pred, x, t)
         if self.use_cfg:
-            u_cond, u_uncond = torch.chunk(u, 2) # the unconditioned batch is the first half
+            u_cond, u_uncond = u[0::2], u[1::2]
             u = (1 - self.cfg_weight) * u_uncond + self.cfg_weight * u_cond
         
         return u

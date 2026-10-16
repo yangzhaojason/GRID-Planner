@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from flow_planner.onpolicy.rollout_runner import NuPlanSimConfig, NuPlanSimPaths, run_nuplan_simulation
-from flow_planner.onpolicy.sim_report import find_runner_report, parse_final_score_from_runner_report
+from flow_planner.onpolicy.sim_report import parse_final_score_from_runner_report
 
 
 @dataclass
@@ -79,16 +79,17 @@ def select_teacher_checkpoint_by_sim_score(
         last_proc = proc
         ckpt_exp_uids[ckpt_path] = sim_res.experiment_uid
         ckpt_returncodes[ckpt_path] = int(proc.returncode)
+        if proc.returncode != 0:
+            ckpt_scores[ckpt_path] = float("nan")
+            ckpt_failures[ckpt_path] = f"simulation_failed | returncode={proc.returncode} | stderr_tail={proc.stderr[-1000:]}"
+            continue
         # Try to find report path:
         # Prefer the exact output dir for this experiment_uid (avoids picking up other runs under NUPLAN_EXP_ROOT).
         report_path = None
         if sim_res.output_dir:
-            report_path = find_runner_report(sim_res.output_dir)
-        if report_path is None:
-            report_path = find_runner_report(run_dir)
-        if report_path is None:
-            # last-resort fallback: search under project root (may be slow)
-            report_path = find_runner_report(str(Path(paths.project_root)))
+            exact_report = Path(sim_res.output_dir) / "runner_report.parquet"
+            if exact_report.is_file():
+                report_path = str(exact_report)
 
         if report_path is None:
             ckpt_scores[ckpt_path] = float("nan")
@@ -157,4 +158,3 @@ def select_teacher_checkpoint_by_sim_score(
         Path(run_dir, "teacher_selection.json").write_text(json.dumps(out, indent=2))
 
     return res
-

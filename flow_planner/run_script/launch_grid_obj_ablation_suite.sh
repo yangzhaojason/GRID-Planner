@@ -846,9 +846,12 @@ fieldnames = [
     "epoch",
     "status",
     "score_up",
+    "collision_score_loss",
     "coll_down",
     "red_light_down",
+    "driving_compliance_loss",
     "lane_dev_down",
+    "comfort_failure_rate",
     "jerk_down",
     "latency_down_ms",
     "result_dir",
@@ -969,9 +972,12 @@ fieldnames = [
     "epoch",
     "status",
     "score_up",
+    "collision_score_loss",
     "coll_down",
     "red_light_down",
+    "driving_compliance_loss",
     "lane_dev_down",
+    "comfort_failure_rate",
     "jerk_down",
     "latency_down_ms",
     "result_dir",
@@ -1017,6 +1023,7 @@ persist_best_primary_selection() {
   local out_json="${SUITE_EVAL_DIR}/${PRIMARY_SPLIT}/${variant}/best_checkpoint.json"
   "${PYTHON_BIN}" - "${jsonl_path}" "${out_json}" "${variant}" "${PRIMARY_SPLIT}" <<'PY'
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -1028,7 +1035,13 @@ for line in Path(jsonl_path).read_text(encoding="utf-8").splitlines():
     row = json.loads(line)
     if row.get("status") != "OK" or row.get("score_up") is None:
         continue
-    if best is None or float(row["score_up"]) > float(best["score_up"]):
+    try:
+        score = float(row["score_up"])
+    except (TypeError, ValueError):
+        continue
+    if not math.isfinite(score):
+        continue
+    if best is None or score > float(best["score_up"]):
         best = row
 
 if best is None:

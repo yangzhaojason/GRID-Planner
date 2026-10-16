@@ -17,7 +17,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from flow_planner.train_utils import ddp
 from flow_planner.data.utils.collect import collect_batch
 from flow_planner.train_utils.ddp import reduce_and_average_losses, ddp_setup_universal
-from flow_planner.train_utils.save_model import save_model, resume_model
+from flow_planner.train_utils.save_model import save_model, resume_model, load_model, load_model_weights
 
 
 def set_seed(CUR_SEED):
@@ -33,6 +33,8 @@ def trainer(cfg: DictConfig):
     set_seed(cfg.seed)
     
     global_rank, local_rank, world_size = ddp_setup_universal(verbose=True, cfg=cfg)
+    device = torch.device(f"cuda:{local_rank}" if cfg.ddp.distributed else cfg.device)
+    cfg.device = str(device)
 
     if local_rank == 0:
         os.makedirs(cfg.save_dir, exist_ok=True)
@@ -52,12 +54,11 @@ def trainer(cfg: DictConfig):
 
     # load pretrain checkpoint
     if cfg.pretrained_checkpoint is not None:
-        ckpt = torch.load(cfg.pretrained_checkpoint, weights_only=True)
-        model.load_state_dict({n.split("module.")[1]: v for n, v in ckpt['ema_state_dict'].items()})
+        load_model_weights(model, load_model(cfg.pretrained_checkpoint))
 
-    model = model.to(local_rank)  # Move model to the current global_rank's GPU
+    model = model.to(device)
     if cfg.ddp.distributed:
-        model = DDP(model, device_ids=[local_rank], output_device=global_rank)
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
     
     # construct dataset & dataloader
     logger.info("construct dataset and dataloader")
@@ -71,7 +72,7 @@ def trainer(cfg: DictConfig):
 
     # wrap core.value_net with DDP (if present) so critic is synchronized across ranks
     if cfg.ddp.distributed and hasattr(core, "value_net") and core.value_net is not None:
-        core.value_net = DDP(core.value_net.to(local_rank), device_ids=[local_rank], output_device=global_rank)
+        core.value_net = DDP(core.value_net.to(device), device_ids=[local_rank], output_device=local_rank)
 
     # build optimizer (model params + core aux params)
     logger.info("build optimizer")
@@ -257,7 +258,8 @@ def trainer(cfg: DictConfig):
             
     logger.info(f"Training finished - Time consumed: {time.strftime('%H:%M:%S', time.gmtime(time.time()-timer))}")
     
-    torch.distributed.destroy_process_group()
+    if ddp.is_dist_avail_and_initialized():
+        torch.distributed.destroy_process_group()
     
 if __name__ == '__main__':
     trainer()

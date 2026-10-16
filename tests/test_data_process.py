@@ -6,6 +6,8 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import types
+from unittest import mock
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +59,45 @@ class DataProcessTest(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
+
+    def test_preprocessing_passes_output_directory_to_processor(self):
+        module = self.load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            split = root / "split.json"
+            split.write_text('["training-log"]')
+            saved = root / "processed"
+
+            class Processor:
+                def __init__(self, save_dir):
+                    # Match the real processor's path contract; a Namespace fails here.
+                    self.save_dir = Path(save_dir)
+
+                def work(self, scenarios):
+                    self.save_dir.joinpath("sample.npz").touch()
+
+            class Builder:
+                def __init__(self, *args):
+                    pass
+
+                def get_scenarios(self, scenario_filter, worker):
+                    return [object()]
+
+            modules = {}
+            for name, symbols in {
+                "flow_planner.data.data_process.data_processor": {"DataProcessor": Processor},
+                "nuplan.planning.utils.multithreading.worker_parallel": {"SingleMachineParallelExecutor": lambda **kw: object()},
+                "nuplan.planning.scenario_builder.scenario_filter": {"ScenarioFilter": lambda *a: a},
+                "nuplan.planning.scenario_builder.nuplan_db.nuplan_scenario_builder": {"NuPlanScenarioBuilder": Builder},
+            }.items():
+                external = types.ModuleType(name)
+                external.__dict__.update(symbols)
+                modules[name] = external
+            argv = ["data_process.py", "--data_path", str(root), "--map_path", str(root),
+                    "--log_names", str(split), "--save_path", str(saved)]
+            with mock.patch.dict(sys.modules, modules), mock.patch.object(sys, "argv", argv):
+                module.main()
+            self.assertEqual(json.loads((saved / "flow_planner_training.json").read_text()), ["sample.npz"])
 
     def test_index_contains_only_sorted_npz_files(self):
         module = self.load_module()

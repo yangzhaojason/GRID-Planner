@@ -41,12 +41,14 @@ class FlowODE(Scheduler):
             
         return path_sample.x_t, target, t
     
-    def generate(self, x_init, model_fn, model_pred_type, use_cfg, **model_extra):
+    def generate(self, x_init, model_fn, model_pred_type, use_cfg, cfg_weight=None, **model_extra):
         '''
-        Sample a the data using the model_fn. If use_cfg, the predicted velocity will be chunked and treats the first chunk as conditioned velocity, the second as unconditioned one.
+        Sample using interleaved conditioned/unconditioned scene pairs for CFG.
+        An explicit guidance weight overrides the configured sampling default.
         '''
         velocity_func = self.translation_funcs[(model_pred_type, 'velocity')]
-        velocity_model = VelocityModel(model_fn, self.path, velocity_func, use_cfg=use_cfg, cfg_weight=self.cfg_weight)
+        effective_cfg_weight = self.cfg_weight if cfg_weight is None else cfg_weight
+        velocity_model = VelocityModel(model_fn, self.path, velocity_func, use_cfg=use_cfg, cfg_weight=effective_cfg_weight)
         
         solver = ODESolver(velocity_model=velocity_model)
         

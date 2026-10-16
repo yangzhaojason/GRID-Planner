@@ -460,6 +460,11 @@ class OPSDDistillCore(FlowMatchingCore):
         gaiw = self._compute_graph_aware_weight(data)
 
         prediction, loss_dict = model(data, mode="train")
+        if loss_dict.get("pred_future_denorm") is None:
+            raise RuntimeError(
+                "Enabled OPSD training with an attached teacher requires model forward_train "
+                "to return loss_dict['pred_future_denorm']; refusing to omit distillation or reward terms."
+            )
 
         # Apply graph-aware weighting on ego_planning_loss if available (same as FlowMatchingCore)
         if gaiw is not None and "ego_planning_loss_per_sample" in loss_dict:

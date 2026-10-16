@@ -15,7 +15,7 @@ from typing import Dict, List
 STABILITY_VARIANTS = ["full_no_clipping", "full_no_batch_norm", "full"]
 DERIVED_METRICS = {"p90_over_p50", "p99_over_p50"}
 WEIGHT_METRICS = {"gaiw_p50", "gaiw_p90", "gaiw_p99"}
-EVAL_METRICS = {"score_up", "coll_down"}
+EVAL_METRICS = {"score_up", "coll_down", "collision_score_loss"}
 
 
 def _read_rows(path: Path) -> List[Dict[str, str]]:
@@ -131,7 +131,7 @@ def _mock_value(
         return mock_values[variant]["gaiw_p90"][epoch] / mock_values[variant]["gaiw_p50"][epoch]
     if metric == "p99_over_p50":
         return mock_values[variant]["gaiw_p99"][epoch] / mock_values[variant]["gaiw_p50"][epoch]
-    return mock_values[variant][metric][epoch]
+    return mock_values[variant]["coll_down" if metric == "collision_score_loss" else metric][epoch]
 
 
 def _mock_rows(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:

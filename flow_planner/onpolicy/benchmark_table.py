@@ -327,7 +327,7 @@ def _fmt(v: Optional[float], ndigits: int = 6) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Print benchmark table metrics (Score/Coll/Red-light/Lane dev/Jerk/Latency) from nuPlan outputs."
+        description="Print nuPlan score, collision/driving score losses, comfort failure rate, and latency."
     )
     parser.add_argument(
         "--report",
@@ -383,7 +383,6 @@ def main() -> None:
     drivable_comp = _to_float_or_none(row.get("drivable_area_compliance"))
     direction_comp = _to_float_or_none(row.get("driving_direction_compliance"))
     comfort_comp = _to_float_or_none(row.get("ego_is_comfortable"))
-    jerk_direct = _to_float_or_none(row.get("ego_jerk"))
 
     # Table columns (lower is better for violation-style columns)
     coll_violation = None if no_at_fault_coll is None else (1.0 - no_at_fault_coll)
@@ -405,26 +404,13 @@ def main() -> None:
         else:
             red_light_src = "N/A (not in default nuPlan final_score)"
 
-    lane_dev = _pick_first_number(row, ("lane_deviation", "ego_lane_deviation", "lane_dev_violation"))
-    lane_dev_src = "custom / provided by report"
-    if lane_dev is None:
-        if drivable_comp is not None and direction_comp is not None:
-            lane_dev = 1.0 - 0.5 * (drivable_comp + direction_comp)
-            lane_dev_src = "proxy: 1 - mean(drivable_area_compliance, driving_direction_compliance)"
-        elif drivable_comp is not None:
-            lane_dev = 1.0 - drivable_comp
-            lane_dev_src = "proxy: 1 - drivable_area_compliance"
-        else:
-            lane_dev_src = "N/A (no lane proxy fields found)"
-
-    jerk_metric = jerk_direct
-    jerk_src = "ego_jerk from report"
-    if jerk_metric is None:
-        if comfort_comp is not None:
-            jerk_metric = 1.0 - comfort_comp
-            jerk_src = "proxy: 1 - ego_is_comfortable"
-        else:
-            jerk_src = "N/A (no jerk/comfort field found)"
+    # These are dimensionless metric-score losses, not physical lane deviation or jerk.
+    lane_dev = None
+    if drivable_comp is not None and direction_comp is not None:
+        lane_dev = 1.0 - 0.5 * (drivable_comp + direction_comp)
+    lane_dev_src = "1 - mean(drivable_area_compliance, driving_direction_compliance); dimensionless score loss"
+    jerk_metric = None if comfort_comp is None else 1.0 - comfort_comp
+    jerk_src = "1 - ego_is_comfortable; fraction failing any acceleration, jerk, or yaw comfort bound"
 
     latency_ms, latency_src = _load_latency_ms(
         args.latency_ms, args.latency_json, report_path, args.latency_mode
@@ -434,6 +420,14 @@ def main() -> None:
         "variant": args.variant,
         "report_path": report_path,
         "score_up": score,
+        "collision_score_loss": coll_violation,
+        "driving_compliance_loss": lane_dev,
+        "comfort_failure_rate": jerk_metric,
+        "legacy_aliases": {
+            "coll_down": "collision_score_loss",
+            "lane_dev_down": "driving_compliance_loss",
+            "jerk_down": "comfort_failure_rate",
+        },
         "coll_down": coll_violation,
         "red_light_down": red_light_violation,
         "lane_dev_down": lane_dev,
@@ -441,6 +435,9 @@ def main() -> None:
         "latency_down_ms": latency_ms,
         "latency_mode": args.latency_mode,
         "source": {
+            "collision_score_loss": "1 - no_ego_at_fault_collisions metric score; not a collision event rate",
+            "driving_compliance_loss": lane_dev_src,
+            "comfort_failure_rate": jerk_src,
             "red_light": red_light_src,
             "lane_dev": lane_dev_src,
             "jerk": jerk_src,
@@ -462,21 +459,21 @@ def main() -> None:
     print(f"Variant:   {args.variant}")
     print(f"Report:    {report_path}")
     print(f"Score_up:      {_fmt(score)}")
-    print(f"Coll_down:     {_fmt(coll_violation)}")
+    print(f"Collision score loss: {_fmt(coll_violation)}")
     print(f"RedLight_down: {_fmt(red_light_violation)}")
-    print(f"LaneDev_down:  {_fmt(lane_dev)}")
-    print(f"Jerk_down:     {_fmt(jerk_metric)}")
+    print(f"Driving compliance loss: {_fmt(lane_dev)}")
+    print(f"Comfort failure rate: {_fmt(jerk_metric)}")
     print(f"Latency_down:  {_fmt(latency_ms, ndigits=3)}")
     print("")
     print("Sources:")
     print("- Score: nuPlan final_score.score")
-    print("- Coll:  1 - no_ego_at_fault_collisions")
+    print("- Collision score loss: 1 - no_ego_at_fault_collisions (not a collision event rate)")
     print(f"- Red-light: {red_light_src}")
-    print(f"- Lane dev:  {lane_dev_src}")
-    print(f"- Jerk:      {jerk_src}")
+    print(f"- Driving compliance loss: {lane_dev_src}")
+    print(f"- Comfort failure rate: {jerk_src}")
     print(f"- Latency:   {latency_src}")
     print("")
-    print("Markdown row:")
+    print("Markdown row (Score | Collision score loss | Red-light | Driving compliance loss | Comfort failure rate | Latency ms):")
     print(
         f"| {args.variant} | {_fmt(score)} | {_fmt(coll_violation)} | {_fmt(red_light_violation)} | "
         f"{_fmt(lane_dev)} | {_fmt(jerk_metric)} | {_fmt(latency_ms, ndigits=3)} |"

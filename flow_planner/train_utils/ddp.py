@@ -8,7 +8,7 @@ import subprocess
 
 def ddp_setup_universal(verbose=False, cfg=None):
        if not cfg.ddp.distributed:
-              print(f"do not use ddp, train on GPU 0")
+              print("Not using DDP mode")
               return 0, 0, 1
               
        if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
@@ -24,10 +24,11 @@ def ddp_setup_universal(verbose=False, cfg=None):
               node_list = os.environ['SLURM_NODELIST']
               num_gpus = torch.cuda.device_count()
               addr = subprocess.getoutput(f'scontrol show hostname {node_list} | head -n1')
-              os.environ['MASTER_PORT'] = str(cfg.port)
+              os.environ['MASTER_PORT'] = str(getattr(cfg.ddp, 'port', '29529'))
               os.environ['MASTER_ADDR'] = addr
        else:
               print("Not using DDP mode")
+              cfg.ddp.distributed = False
               return 0, 0, 1
 
        os.environ['WORLD_SIZE'] = str(world_size)

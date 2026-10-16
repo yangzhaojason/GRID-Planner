@@ -1,6 +1,26 @@
-import io
+import copy
 import torch
 import os
+from torch.nn.modules.utils import consume_prefix_in_state_dict_if_present
+
+from flow_planner.train_utils.ddp import get_model
+
+
+def load_model_weights(model, checkpoint, use_ema=True):
+    """Load plain or DDP weights into either a plain or DDP model.
+
+    Accept training checkpoints and raw state dictionaries, retaining strict
+    parameter validation so incompatible architectures fail at the source.
+    """
+    if use_ema and "ema_state_dict" in checkpoint:
+        state = checkpoint["ema_state_dict"]
+    else:
+        state = checkpoint.get("model", checkpoint)
+    state = copy.copy(state)
+    if hasattr(state, "_metadata"):
+        state._metadata = state._metadata.copy()
+    consume_prefix_in_state_dict_if_present(state, "module.")
+    return get_model(model).load_state_dict(state)
 
 def save_model(model, optimizer, scheduler, save_path, epoch, train_loss, wandb_id, ema, save_every_epoch=200, core=None):
     """
@@ -31,7 +51,7 @@ def load_model(path: str):
     """
     load ckpt from path
     """
-    ckpt = torch.load(path, weights_only=True)
+    ckpt = torch.load(path, weights_only=True, map_location="cpu")
 
     return ckpt
 
@@ -50,60 +70,50 @@ def resume_model(path: str, model, optimizer, scheduler, ema, device, core=None)
     if not os.path.isfile(ckpt_path):
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
 
-    ckpt = torch.load(ckpt_path, weights_only=True)
+    # Stage on CPU: rank-zero checkpoints must not allocate a full copy on
+    # cuda:0 in every worker. State loading moves tensors to each target model.
+    ckpt = torch.load(ckpt_path, weights_only=True, map_location="cpu")
 
     # load model               
-    try:
-        model.load_state_dict(ckpt['model'])
-    except:
-        model.load_state_dict({n.split("module.")[1]: v for n, v in ckpt.items()})
+    load_model_weights(model, ckpt, use_ema=False)
     print("Model load done")
     
     # load optimizer
-    try:
+    if "optimizer" in ckpt:
         optimizer.load_state_dict(ckpt['optimizer'])
         print("Optimizer load done")
-    except:
-        print("no pretrained optimizer found")
+    else:
+        print("no pretrained optimizer found; keeping initialized optimizer")
             
     # load schedule
-    try:
+    if "schedule" in ckpt:
         scheduler.load_state_dict(ckpt['schedule'])
         print("Schedule load done")
-    except:
-        print("no schedule found,")
+    else:
+        print("no schedule found; keeping initialized scheduler")
     
     # load step
-    try:
-        init_epoch = ckpt['epoch']
-        print("Step load done")
-    except:
-        init_epoch = 0
+    init_epoch = ckpt.get('epoch', 0)
     
 
     # Load wandb id
-    try:
-        wandb_id = ckpt['wandb_id']
-        print("wandb id load done")
-    except:
-        wandb_id = None
+    wandb_id = ckpt.get('wandb_id')
 
-    try:
-        ema.ema.load_state_dict({n: v for n, v in ckpt['ema_state_dict'].items()})
-        ema.ema.eval()
-        for p in ema.ema.parameters():
-            p.requires_grad_(False)
-
+    if "ema_state_dict" in ckpt:
+        load_model_weights(ema.ema, ckpt['ema_state_dict'], use_ema=False)
         print("ema load done")
-    except:
-        print('no ema shadow found')
+    else:
+        # EMA is created before resume in the trainers. Without a saved shadow,
+        # initialize it from the restored weights, not the pre-resume model.
+        load_model_weights(ema.ema, get_model(model).state_dict(), use_ema=False)
+        print("no ema shadow found; initialized from restored model")
+    ema.ema.eval()
+    for p in ema.ema.parameters():
+        p.requires_grad_(False)
 
-    # load aux state (best-effort)
+    # A present but incompatible auxiliary state must not silently reset the critic.
     if core is not None and "aux_state_dict" in ckpt and hasattr(core, "load_aux_state_dict"):
-        try:
-            core.load_aux_state_dict(ckpt["aux_state_dict"])
-            print("aux state load done")
-        except Exception:
-            print("aux state load failed (ignored)")
+        core.load_aux_state_dict(ckpt["aux_state_dict"])
+        print("aux state load done")
 
     return model, optimizer, scheduler, init_epoch, wandb_id, ema

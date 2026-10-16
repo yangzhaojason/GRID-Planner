@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -56,7 +57,13 @@ def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
 
 
 def _best_row(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    valid = [r for r in rows if r.get("status") == "OK" and r.get("score_up") is not None]
+    valid = []
+    for row in rows:
+        try:
+            if row.get("status") == "OK" and math.isfinite(float(row.get("score_up"))):
+                valid.append(row)
+        except (TypeError, ValueError):
+            continue
     if not valid:
         return None
     return max(valid, key=lambda r: float(r["score_up"]))
@@ -101,21 +108,27 @@ def _load_variant_record(
             continue
         report_path = suite_root / "reports" / split / variant / "selected_checkpoint.json"
         split_payloads[split] = _read_json(report_path)
+        payload = split_payloads[split]
+        if payload and (_best_row([payload]) is None or payload.get("checkpoint") != selected_checkpoint):
+            split_payloads[split] = {"status": "INVALID", "error": "failed evaluation, non-finite score, or selected checkpoint mismatch", "report_path": str(report_path)}
 
-    metric_payload = split_payloads.get(metric_split) or split_payloads.get(primary_split, {})
+    metric_payload = split_payloads.get(metric_split, {})
+    if metric_payload.get("status") != "OK":
+        metric_payload = {}
 
     record.update(
         {
-            "status": "OK",
+            "status": "OK" if all(p.get("status") == "OK" for p in split_payloads.values()) else "INCOMPLETE",
             "selected_checkpoint": selected_checkpoint,
             "selected_epoch": best_primary.get("epoch"),
             "val14_score_up": split_payloads.get("val14", {}).get("score_up"),
             "test14_hard_score_up": split_payloads.get("test14-hard", {}).get("score_up"),
             "test14_score_up": split_payloads.get("test14-random", {}).get("score_up"),
-            "coll_down": metric_payload.get("coll_down"),
-            "lane_dev_down": metric_payload.get("lane_dev_down"),
-            "jerk_down": metric_payload.get("jerk_down"),
+            "collision_score_loss": metric_payload.get("collision_score_loss"),
+            "driving_compliance_loss": metric_payload.get("driving_compliance_loss"),
+            "comfort_failure_rate": metric_payload.get("comfort_failure_rate"),
             "latency_down_ms": metric_payload.get("latency_down_ms"),
+            "source": metric_payload.get("source", {}),
             "report_path": metric_payload.get("report_path"),
             "result_dir": metric_payload.get("result_dir"),
             "json_path": metric_payload.get("json_path"),
@@ -142,10 +155,11 @@ def _write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
         "val14_score_up",
         "test14_hard_score_up",
         "test14_score_up",
-        "coll_down",
-        "lane_dev_down",
-        "jerk_down",
+        "collision_score_loss",
+        "driving_compliance_loss",
+        "comfort_failure_rate",
         "latency_down_ms",
+        "source",
         "report_path",
         "result_dir",
         "json_path",
@@ -159,7 +173,9 @@ def _write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
 
 def _write_markdown(path: Path, rows: List[Dict[str, Any]], metric_split: str) -> None:
     lines = [
-        f"| Variant | {SPLIT_LABELS['val14']} | {SPLIT_LABELS['test14-hard']} | {SPLIT_LABELS['test14-random']} | Coll. ({SPLIT_LABELS[metric_split]}) | Lane dev. ({SPLIT_LABELS[metric_split]}) | Jerk ({SPLIT_LABELS[metric_split]}) | Latency ({SPLIT_LABELS[metric_split]}, ms) | Best ckpt |",
+        "Collision and driving values are dimensionless metric-score losses; comfort is the fraction failing any comfort bound. These are not physical lane deviation, jerk, or collision event rate.",
+        "",
+        f"| Variant | {SPLIT_LABELS['val14']} | {SPLIT_LABELS['test14-hard']} | {SPLIT_LABELS['test14-random']} | Collision score loss ({SPLIT_LABELS[metric_split]}) | Driving compliance loss ({SPLIT_LABELS[metric_split]}) | Comfort failure rate ({SPLIT_LABELS[metric_split]}) | Latency ({SPLIT_LABELS[metric_split]}, ms) | Best ckpt |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for row in rows:
@@ -173,11 +189,11 @@ def _write_markdown(path: Path, rows: List[Dict[str, Any]], metric_split: str) -
             + " | "
             + _fmt(row.get("test14_score_up"))
             + " | "
-            + _fmt(row.get("coll_down"))
+            + _fmt(row.get("collision_score_loss"))
             + " | "
-            + _fmt(row.get("lane_dev_down"))
+            + _fmt(row.get("driving_compliance_loss"))
             + " | "
-            + _fmt(row.get("jerk_down"))
+            + _fmt(row.get("comfort_failure_rate"))
             + " | "
             + _fmt(row.get("latency_down_ms"), ndigits=3)
             + " | "
@@ -188,16 +204,16 @@ def _write_markdown(path: Path, rows: List[Dict[str, Any]], metric_split: str) -
 
 
 def _write_latex_rows(path: Path, rows: List[Dict[str, Any]]) -> None:
-    lines: List[str] = []
+    lines: List[str] = ["% Collision/driving: dimensionless nuPlan metric-score losses. Comfort: any-bound failure fraction, not physical jerk."]
     for row in rows:
         lines.append(
             f"{row['variant_label']} & "
             f"{_fmt(row.get('val14_score_up'), missing='xxx')} & "
             f"{_fmt(row.get('test14_hard_score_up'), missing='xxx')} & "
             f"{_fmt(row.get('test14_score_up'), missing='xxx')} & "
-            f"{_fmt(row.get('coll_down'), missing='xxx')} & "
-            f"{_fmt(row.get('lane_dev_down'), missing='xxx')} & "
-            f"{_fmt(row.get('jerk_down'), missing='xxx')} & "
+            f"{_fmt(row.get('collision_score_loss'), missing='xxx')} & "
+            f"{_fmt(row.get('driving_compliance_loss'), missing='xxx')} & "
+            f"{_fmt(row.get('comfort_failure_rate'), missing='xxx')} & "
             f"{_fmt(row.get('latency_down_ms'), ndigits=3, missing='xxx')} \\\\"
         )
         if row["variant_id"] in LATEX_GROUP_BREAK_AFTER:
@@ -213,9 +229,9 @@ def _write_latex_table(path: Path, rows: List[Dict[str, Any]], metric_split: str
             f"{_fmt(row.get('val14_score_up'), missing='xxx')} & "
             f"{_fmt(row.get('test14_hard_score_up'), missing='xxx')} & "
             f"{_fmt(row.get('test14_score_up'), missing='xxx')} & "
-            f"{_fmt(row.get('coll_down'), missing='xxx')} & "
-            f"{_fmt(row.get('lane_dev_down'), missing='xxx')} & "
-            f"{_fmt(row.get('jerk_down'), missing='xxx')} & "
+            f"{_fmt(row.get('collision_score_loss'), missing='xxx')} & "
+            f"{_fmt(row.get('driving_compliance_loss'), missing='xxx')} & "
+            f"{_fmt(row.get('comfort_failure_rate'), missing='xxx')} & "
             f"{_fmt(row.get('latency_down_ms'), ndigits=3, missing='xxx')} \\\\"
         )
         if row["variant_id"] in LATEX_GROUP_BREAK_AFTER:
@@ -224,16 +240,16 @@ def _write_latex_table(path: Path, rows: List[Dict[str, Any]], metric_split: str
     lines = [
         "\\begin{table*}[t]",
         "\\centering",
-        "\\caption{\\textbf{Unified on-policy objective ablation.} Each row removes one ingredient from Eq.~\\ref{eq:total_loss} while keeping the graph-aware return $R(\\tau,G)$, rollout budget, and evaluation protocol fixed. We report reactive closed-loop scores on nuPlan Val14, Test14-hard, and Test14 ($\\uparrow$), together with collision rate ($\\downarrow$), lane deviation ($\\downarrow$), comfort measured by jerk ($\\downarrow$), and planning latency ($\\downarrow$). The last two rows ablate OPSD-specific choices (advantage gating and teacher selection). Ancillary metrics are reported on "
+        "\\caption{\\textbf{Unified on-policy objective ablation.} Each row removes one ingredient from Eq.~\\ref{eq:total_loss} while keeping the graph-aware return $R(\\tau,G)$, rollout budget, and evaluation protocol fixed. We report reactive closed-loop scores on nuPlan Val14, Test14-hard, and Test14 ($\\uparrow$), together with collision metric-score loss ($\\downarrow$), driving-compliance score loss ($\\downarrow$), comfort failure rate ($\\downarrow$), and planning latency ($\\downarrow$). The last two rows ablate OPSD-specific choices (advantage gating and teacher selection). Ancillary metrics are reported on "
         + SPLIT_LABELS[metric_split]
-        + ".}",
+        + ". Collision/driving values are dimensionless score losses; comfort is the fraction failing any comfort bound, not physical jerk.}",
         "\\label{tab:ablation_grid_obj}",
         "\\small",
         "\\setlength{\\tabcolsep}{3.5pt}",
         "\\resizebox{\\linewidth}{!}{",
         "\\begin{tabular}{lccccccc}",
         "\\toprule",
-        "\\textbf{Variant} & \\textbf{Val14 (R)} $\\uparrow$ & \\textbf{Test14-hard (R)} $\\uparrow$ & \\textbf{Test14 (R)} $\\uparrow$ & \\textbf{Coll.} $\\downarrow$ & \\textbf{Lane dev.} $\\downarrow$ & \\textbf{Jerk} $\\downarrow$ & \\textbf{Latency} $\\downarrow$ \\\\",
+        "\\textbf{Variant} & \\textbf{Val14 (R)} $\\uparrow$ & \\textbf{Test14-hard (R)} $\\uparrow$ & \\textbf{Test14 (R)} $\\uparrow$ & \\textbf{Collision score loss} $\\downarrow$ & \\textbf{Driving compliance loss} $\\downarrow$ & \\textbf{Comfort failure rate} $\\downarrow$ & \\textbf{Latency} $\\downarrow$ \\\\",
         "\\midrule",
         *body_lines,
         "\\bottomrule",
@@ -262,7 +278,7 @@ def main() -> None:
         "--metric-split",
         default="test14-random",
         choices=SPLIT_ORDER,
-        help="Split used for Coll./Lane dev./Jerk/Latency columns.",
+        help="Split used for Collision score loss/Driving compliance loss/Comfort failure rate/Latency columns.",
     )
     args = parser.parse_args()
 

@@ -111,9 +111,11 @@ class NuPlanDataSample:
             
             self.lanes = self.lanes.to(target)
             self.lanes_speedlimit = self.lanes_speedlimit.to(target)
+            self.lanes_has_speedlimit = self.lanes_has_speedlimit.to(target)
             
             self.routes = self.routes.to(target)
             self.routes_speedlimit = self.routes_speedlimit.to(target)
+            self.routes_has_speedlimit = self.routes_has_speedlimit.to(target)
             
             self.map_objects = self.map_objects.to(target)
 

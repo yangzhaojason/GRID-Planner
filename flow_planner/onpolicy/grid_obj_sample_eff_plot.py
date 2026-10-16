@@ -89,7 +89,7 @@ def _extract_payload_from_suite(
         meta_path = suite_root / "meta" / f"{variant}.json"
         meta = _read_json(meta_path) if meta_path.exists() else {}
         score_points = _metric_points(suite_root, primary_split, variant, "score_up")
-        coll_points = _metric_points(suite_root, primary_split, variant, "coll_down")
+        coll_points = _metric_points(suite_root, primary_split, variant, "collision_score_loss")
         if any("rollouts" in p for p in score_points + coll_points):
             x_axis = "on_policy_rollouts"
         variant_payloads[variant] = {
@@ -98,7 +98,7 @@ def _extract_payload_from_suite(
             "meta": meta,
             "metrics": {
                 "score_up": score_points,
-                "coll_down": coll_points,
+                "collision_score_loss": coll_points,
             },
         }
     return {
@@ -117,7 +117,7 @@ def _flatten_payload_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
             for point in points:
                 rows.append(
                     {
-                        "suite_root": payload.get("source_suite_root"),
+                        "suite_root": point.get("suite_root", payload.get("source_suite_root")),
                         "primary_split": payload.get("primary_split"),
                         "x_axis": payload.get("x_axis"),
                         "variant": variant,
@@ -219,7 +219,7 @@ def _render_figure(payload: Dict[str, Any], output_png: Path, output_svg: Path, 
 
     fig, axes = plt.subplots(1, 2, figsize=(11.6, 4.4))
     _plot_metric_panel(axes[0], payload, "score_up", "Reactive Score vs. Rollouts", "Closed-loop score")
-    _plot_metric_panel(axes[1], payload, "coll_down", "Collision Rate vs. Rollouts", "Collision rate")
+    _plot_metric_panel(axes[1], payload, "collision_score_loss", "Collision Score Loss vs. Rollouts", "Collision score loss")
 
     xlabel = "On-policy rollouts" if payload.get("x_axis") == "on_policy_rollouts" else "Epoch"
     for ax in axes:
@@ -230,6 +230,9 @@ def _render_figure(payload: Dict[str, Any], output_png: Path, output_svg: Path, 
     fig.suptitle("Sample efficiency of the unified on-policy objective", fontsize=14)
     fig.tight_layout()
     fig.subplots_adjust(top=0.84)
+    from flow_planner.onpolicy.gaiw_stability_plot import _contains_synthetic
+    if _contains_synthetic(payload):
+        fig.text(0.5, 0.005, "SYNTHETIC ILLUSTRATION — NOT MEASURED RESULTS", ha="center", color="#A00000", fontweight="bold")
     fig.savefig(output_png, dpi=dpi, bbox_inches="tight")
     fig.savefig(output_svg, bbox_inches="tight")
 

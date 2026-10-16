@@ -33,34 +33,36 @@ before comparing results with the paper.
 | `flow_planner/run_script/` | Training, simulation, and ablation launchers |
 | `configs/environment.example.sh` | Machine-specific path configuration template |
 | `data_process.py`, `data_process.sh` | nuPlan preprocessing and dataset indexing |
-| `tests/` | Lightweight packaging and command-line regression checks |
+| `tests/` | Packaging, commands, CPU model/runtime, reward and reporting regression checks |
 
 ## Installation
 
-Training and simulation target a Linux machine with NVIDIA GPUs. The code and
-pinned PyTorch stack require a compatible CUDA installation. Use Python 3.10
-for the commands below; the complete training environment has not been
-validated as part of the repository cleanup.
+Training and simulation target a Linux machine with NVIDIA GPUs. Use Python 3.10
+and the PyTorch/CUDA build appropriate to your machine. The pinned nuPlan source
+below was checked with the CPU model and runtime tests on macOS; full Linux/CUDA
+training and dataset-backed simulation still require validation.
 
 ```bash
 git clone https://github.com/yangzhaojason/GRID-Planner.git
 cd GRID-Planner
 conda create -n grid-planner python=3.10
 conda activate grid-planner
+python -m pip install "setuptools>=68,<82" wheel
 
-# nuPlan is an external dependency, installed from its own source checkout.
+# Use the compatible runtime subset, not upstream's old Torch/Hydra pins.
+python -m pip install -r requirements.txt -r requirements-nuplan.txt
 git clone https://github.com/motional/nuplan-devkit.git nuplan-devkit
-python -m pip install -r nuplan-devkit/requirements.txt
-python -m pip install -e ./nuplan-devkit
-python -m pip install -r requirements.txt
+git -C nuplan-devkit checkout e9241677997dd86bfc0bcd44817ab04fe631405b
+python -m pip install --no-deps --no-build-isolation -e ./nuplan-devkit
 python -m pip install -e . --no-deps
 python -m pip check
 ```
 
-Choose the PyTorch/CUDA build appropriate to the machine while retaining the
-versions in `requirements.txt`. The repository does not yet pin a validated
-nuPlan commit or provide a fully locked environment. Record the devkit commit,
-CUDA version, and `pip freeze` with each experiment.
+The devkit's original requirement files conflict with this project's Hydra 1.3.2
+and Torch 2.3.0. `requirements-nuplan.txt` supplies the runtime imports needed for
+preprocessing, simulation, and nuBoard; it does not provision upstream's remote
+submission service or full devkit development suite. It is not a transitive lock
+file. Record the devkit commit, CUDA version, and `pip freeze` with each experiment.
 
 Download nuPlan data and maps separately using the
 [nuPlan devkit instructions](https://github.com/motional/nuplan-devkit).
@@ -110,7 +112,9 @@ The script writes processed `.npz` files to `TRAINING_DATA` and a sorted filenam
 list to `TRAINING_JSON`. Use a separate processed-data directory for each split:
 the index includes every `.npz` file already present in that directory.
 `python data_process.py --help` lists the preprocessing options, including
-`--log_names`, `--output_json`, and `--shuffle_scenarios false`.
+`--log_names`, `--output_json`, and `--shuffle_scenarios false`. Feature dimensions
+are fixed by `DataProcessor`; removed shape flags previously had no effect.
+Changing feature dimensions requires matching processor and model changes.
 
 Two existing manifests are retained for traceability:
 
@@ -171,7 +175,9 @@ python print_result.py /path/to/simulation/runner_report.parquet
 Available filters are `val14`, `test14-hard`, and `test14-random`. Challenges are
 `closed_loop_nonreactive_agents` and `closed_loop_reactive_agents`. The result
 printer resolves `runner_report.parquet` to the associated aggregated metrics;
-it also accepts the weighted-average metrics parquet directly.
+it also accepts the weighted-average metrics parquet directly when the matching
+runner report is present. It rejects failed simulations, ambiguous reports,
+non-finite scores, planner mismatches, and inconsistent scenario identities/counts.
 Use `run_nuboard.ipynb` to visualize an evaluation after configuring its paths.
 
 The `launch_*_ablation_suite.sh` scripts and `onpolicy/*collect.py` utilities
@@ -179,7 +185,7 @@ support further experiments. The mock stability-data generator is
 **illustration-only**, and its output must not be used as measured results.
 See [asset provenance](assets/README.md).
 
-## Lightweight checks
+## Validation
 
 ```bash
 python -m unittest discover -s tests -v
@@ -188,9 +194,16 @@ bash -n data_process.sh
 for script in flow_planner/run_script/*.sh; do bash -n "$script"; done
 ```
 
-These checks cover packaging, preprocessing CLI behavior, and launcher contracts.
-They do not validate GPU training, closed-loop driving performance, or paper
-metrics. The wheel tests require `setuptools` and `wheel` in the test environment.
+With the installation above, these checks include a real full-size model forward,
+backward, and CFG sampling on synthetic CPU scenes, checkpoint portability,
+training lifecycle checks, and actual Parquet reporting. Without training/report
+dependencies, the corresponding tests skip; the lightweight suite alone is not
+runtime validation. The wheel tests require `setuptools` and `wheel`.
+
+CI includes a Python 3.10 CPU runtime job and lightweight Python 3.9/3.12 jobs.
+These checks do not validate GPU training, closed-loop driving performance, or
+paper metrics. See the [release audit](docs/release-audit.md) for verified fixes,
+remaining method differences, and missing reproduction evidence.
 
 ## Citation and attribution
 

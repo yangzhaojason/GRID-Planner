@@ -518,29 +518,11 @@ for CKPT_NAME in "${CKPT_NAMES[@]}"; do
     print_task_submit_log "${LOG_FILE}"
 
     if SCORE="$("${PYTHON_BIN}" - "${RESULT_DIR}/runner_report.parquet" <<'PY'
-import glob
-import os
 import sys
-import pandas as pd
+from flow_planner.onpolicy.sim_report import parse_final_score_from_runner_report
 
-runner_report = sys.argv[1]
-if not os.path.exists(runner_report):
-    raise FileNotFoundError(f"runner_report not found: {runner_report}")
-
-aggregator_dir = os.path.join(os.path.dirname(runner_report), "aggregator_metric")
-candidates = sorted(
-    glob.glob(os.path.join(aggregator_dir, "*weighted_average_metrics*.parquet")),
-    key=os.path.getmtime,
-    reverse=True,
-)
-metrics_path = candidates[0] if candidates else runner_report
-
-df = pd.read_parquet(metrics_path)
-final_score = df[df["scenario"] == "final_score"]
-if final_score.empty:
-    raise RuntimeError(f"Missing final_score row in: {metrics_path}")
-
-print(f"{float(final_score.iloc[0]['score']):.10f}")
+result = parse_final_score_from_runner_report(sys.argv[1])
+print(f"{result.score:.10f}")
 PY
     )"; then
       echo "[OK] ${CKPT_NAME}: score=${SCORE}"

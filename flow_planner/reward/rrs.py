@@ -143,13 +143,16 @@ class RelationalRewardSurrogate(torch.nn.Module):
            hasattr(data, "neighbor_future_observed") and data.neighbor_future_observed is not None and data.neighbor_future_observed.numel() > 0:
             nf = data.neighbor_future_observed.to(ego_xy.device)  # (B, N, T, 3)
             nei_xy = nf[..., 0:2]  # (B, N, T, 2)
-            nei_valid = (nei_xy.abs().sum(dim=-1) > 1e-3).any(dim=-1)  # (B, N)
+            # A tracked agent can disappear within the horizon; zero-padded frames
+            # must not become observations at the ego origin.
+            nei_valid = nei_xy.abs().sum(dim=-1) > 1e-3  # (B, N, T)
         elif hasattr(data, "neighbor_past") and data.neighbor_past is not None and data.neighbor_past.numel() > 0:
             # Constant-velocity extrapolation from current (last past frame) neighbors.
             neigh_last = data.neighbor_past[:, :, -1, :].to(ego_xy.device)  # (B, N, F)
             p0 = neigh_last[:, :, 0:2]  # (B, N, 2)
             v0 = neigh_last[:, :, 4:6]  # (B, N, 2)
-            nei_valid = (p0.abs().sum(dim=-1) > 1e-3)  # (B, N)
+            current_valid = p0.abs().sum(dim=-1) > 1e-3  # (B, N)
+            nei_valid = current_valid[:, :, None].expand(-1, -1, T)
             # Align with ego future horizon (t = dt, 2*dt, ..., T*dt), not including current frame.
             tvec = (torch.arange(1, T + 1, device=ego_xy.device, dtype=ego_xy.dtype) * dt)  # (T,)
             nei_xy = p0[:, :, None, :] + v0[:, :, None, :] * tvec[None, None, :, None]  # (B, N, T, 2)
@@ -157,7 +160,7 @@ class RelationalRewardSurrogate(torch.nn.Module):
         if nei_xy is not None and nei_valid is not None:
             rel = nei_xy - ego_xy[:, None, :, :]  # (B, N, T, 2)
             dist = _safe_norm(rel, dim=-1)  # (B, N, T)
-            dist = dist + (~nei_valid)[:, :, None].to(dist.dtype) * 1e6
+            dist = dist + (~nei_valid).to(dist.dtype) * 1e6
 
             # distance barrier (want dist >= d_safe)
             d_min_t = _softmin(dist, dim=1, tau=float(self.cfg.tau_softmin))  # (B, T)
@@ -180,7 +183,7 @@ class RelationalRewardSurrogate(torch.nn.Module):
             r_sum = r_ego[:, None] + r_nei  # (B, N)
             # min over time of (r_sum - dist) (positive => overlap)
             overlap = (r_sum[:, :, None] - dist)  # (B, N, T)
-            overlap = torch.where(nei_valid[:, :, None], overlap, torch.full_like(overlap, -1e6))
+            overlap = torch.where(nei_valid, overlap, torch.full_like(overlap, -1e6))
             # penalize only positive overlap
             col_sig = _softplus_barrier(overlap, s=float(self.cfg.s_barrier))
             safety_col_pen = col_sig.view(B, -1).mean(dim=-1)
@@ -198,7 +201,10 @@ class RelationalRewardSurrogate(torch.nn.Module):
                 radial = (p_hat * rel_v).sum(dim=-1)  # (B, N, T-1), positive => separating along radial
                 closing = torch.clamp(-radial, min=0.0)
                 ttc = torch.where(closing > 1e-6, d / (closing + 1e-6), torch.full_like(d, float("inf")))
-                ttc = torch.where(nei_valid[:, :, None], ttc, torch.full_like(ttc, float("inf")))
+                # Finite-difference velocity is meaningful only when both endpoints
+                # are observed, never across a transition into/out of padding.
+                interval_valid = nei_valid[..., :-1] & nei_valid[..., 1:]
+                ttc = torch.where(interval_valid, ttc, torch.full_like(ttc, float("inf")))
                 ttc_min_t = ttc.amin(dim=1)  # (B, T-1)
                 safety_ttc_pen = _softplus_barrier(self.cfg.ttc_safe - ttc_min_t, s=float(self.cfg.s_barrier)).mean(dim=-1)
 
@@ -380,4 +386,3 @@ class RelationalRewardSurrogate(torch.nn.Module):
             "rrs_mean_speed": ego_speed,
         }
         return penalty, components
-
