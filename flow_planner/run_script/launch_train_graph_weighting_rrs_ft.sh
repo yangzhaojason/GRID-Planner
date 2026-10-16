@@ -17,7 +17,7 @@ TARGET_SAVE_DIR="${ABLATION_ROOT}/${EXP_TAG}/${RUN_STAMP}"
 mkdir -p "${TARGET_SAVE_DIR}"
 echo "Training outputs will be saved to: ${TARGET_SAVE_DIR}"
 
-# Safety-only RRS regularization preset (see docs/reproducibility.md):
+# Safety-only RRS regularization preset:
 #   L = L_flow_matching + nu * E[ w_GAIW(tau) * RRS_penalty(tau_hat) ]
 # where RRS_reward = -RRS_penalty (logged as rrs_reward_mean)
 
@@ -46,4 +46,3 @@ echo "Training outputs will be saved to: ${TARGET_SAVE_DIR}"
   core.rrs.lam_low_speed=0 \
   optimizer.lr=5e-5 \
   "$@"
-
