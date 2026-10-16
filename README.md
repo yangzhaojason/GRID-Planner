@@ -12,13 +12,9 @@ This research implementation builds on **Flow Planner**, retaining the
 `flow_planner` Python namespace for compatibility with existing checkpoints
 and Hydra configurations.
 
-The repository contains GA-IW, relational reward surrogates, configurable
-on-policy optimization, self-distillation, and nuPlan evaluation utilities.
-It also contains experimental variants that differ from some equations and
-settings in the paper. **Pretrained checkpoints, exact paper-run configurations,
-measured evaluation artifacts, and a complete interPlan reproduction workflow
-are not included.** Read [implementation and reproduction notes](docs/reproducibility.md)
-before comparing results with the paper.
+The repository includes graph-aware importance weighting (GA-IW), relational
+reward surrogates (RRS), configurable on-policy optimization, self-distillation,
+and nuPlan evaluation utilities.
 
 ## Repository layout
 
